@@ -2,6 +2,8 @@
 // OCR en el teléfono con Tesseract.js. Todo se sirve desde /public/tesseract.
 import type { Worker } from "tesseract.js";
 import { extractCodes } from "./code";
+import { parseHints, type ScanHints } from "./variants";
+import { dHash } from "./phash";
 
 let workerPromise: Promise<Worker> | null = null;
 
@@ -74,7 +76,7 @@ function prepare(src: CanvasImageSource, r: Rect, invert: boolean, cardH: number
   return c;
 }
 
-export type ScanResult = { codes: string[]; text: string; preview?: string };
+export type ScanResult = { codes: string[]; text: string; preview?: string; card?: Rect | null };
 
 // Zonas relativas a la carta, de la más precisa a la más amplia. Las amplias
 // cubren cartas más chicas o corridas respecto al marco.
@@ -208,7 +210,7 @@ export async function readCardCode(src: CanvasImageSource, card: Rect): Promise<
     const r = await attempt(src, c, zone, invert);
     text += r.text + "\n";
     preview ??= r.preview;
-    if (r.codes.length) return { codes: r.codes, text, preview: r.preview };
+    if (r.codes.length) return { codes: r.codes, text, preview: r.preview, card: c };
   }
   return { codes: [], text, preview };
 }
@@ -219,4 +221,53 @@ function clamp(r: Rect, src: CanvasImageSource): Rect {
   const x = Math.max(0, Math.min(W - 1, r.x));
   const y = Math.max(0, Math.min(H - 1, r.y));
   return { x, y, w: Math.max(1, Math.min(W - x, r.w)), h: Math.max(1, Math.min(H - y, r.h)) };
+}
+
+// Pistas extra tras leer el código (lecturas baratas sobre la carta detectada):
+// texto de la franja inferior (rareza) y de la mitad baja de la ilustración
+// (sellos WINNER, JUDGE...), más el hash perceptual del recorte.
+export async function readHints(src: CanvasImageSource, card: Rect, code = ""): Promise<ScanHints> {
+  const c = clamp(card, src);
+  const hash = dHash(src, c);
+  let bottom = "", art = "";
+  try {
+    const worker = await getWorker();
+    if (currentPsm !== "11") {
+      await worker.setParameters({ tessedit_pageseg_mode: "11" as never });
+      currentPsm = "11";
+    }
+    const zone = (y: number, h: number) => clamp({ x: c.x, y: c.y + c.h * y, w: c.w, h: c.h * h }, src);
+    // escala moderada: el sello es grande, no hace falta tanto aumento
+    const strip = prepare(src, zone(0.88, 0.12), false, c.h);
+    bottom = (await worker.recognize(strip)).data.text;
+    // Sellos: letras grandes; sin binarizar y a ~480 px de alto de carta (letra de ~40 px)
+    const z = zone(0.3, 0.58);
+    const k = Math.min(1.5, 480 / c.h);
+    const mid = document.createElement("canvas");
+    mid.width = Math.round(z.w * k);
+    mid.height = Math.round(z.h * k);
+    const mctx = mid.getContext("2d")!;
+    mctx.filter = "grayscale(1) contrast(1.4)";
+    mctx.drawImage(src, z.x, z.y, z.w, z.h, 0, 0, mid.width, mid.height);
+    art = (await worker.recognize(mid)).data.text;
+    if (!parseHints(art, code).stamps.length) {
+      // Umbral adaptativo: separa el sello de fondos oscuros o con brillo
+      const bin = prepare(src, z, false, Math.max(c.h * (2000 / 480), 1));
+      art += "\n" + (await worker.recognize(bin)).data.text;
+    }
+  } catch {
+    /* sin OCR extra: solo hash */
+  }
+  const b = parseHints(bottom, code);
+  const a = parseHints(art + "\n" + bottom, code);
+  return { rarity: b.rarity ?? (a.rarity && a.rarity.length > 1 ? a.rarity : undefined), stamps: a.stamps, hash };
+}
+
+/** Copia del fotograma actual (para leer pistas sin que cambie el video). */
+export function snapshot(src: HTMLVideoElement): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = src.videoWidth;
+  c.height = src.videoHeight;
+  c.getContext("2d")!.drawImage(src, 0, 0);
+  return c;
 }

@@ -11,6 +11,7 @@ export type Variant = {
   image: string;
   rarity: string;
   setName: string;
+  setId?: string; // id corto del set de origen si la API lo da (OP05, ST10...)
   color: string;
   type: string;
   price: number | null; // precio de mercado TCGplayer (USD)
@@ -91,6 +92,7 @@ export function normalize(r: Raw): Variant | null {
     image: str(r, "card_image", "image", "image_url"),
     rarity: str(r, "rarity"),
     setName: str(r, "set_name"),
+    setId: str(r, "set_id", "set_code") || undefined,
     color: str(r, "card_color", "color"),
     type: str(r, "card_type", "type"),
     price: num(r, "market_price", "inventory_price"),

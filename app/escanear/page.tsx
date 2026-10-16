@@ -1,19 +1,28 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getWorker, readCardCode, readCardCodeOnce } from "@/lib/ocr";
+import { getWorker, readCardCode, readCardCodeOnce, readHints, snapshot } from "@/lib/ocr";
 import { normalizeCode } from "@/lib/code";
 import { scanFeedback, unlockAudio } from "@/lib/feedback";
 import { BulkPanel } from "./bulk";
 import { baseVariant, enqueue, getBatchSize, markSeen, queueCount, readQueue, recentlySeen, setBatchSize, useQueue } from "@/lib/bulk";
 import { ReadBanner, VariantPicker } from "./confirm";
 import type { Variant } from "@/lib/optcg";
+import { hintSummary, lastChoice, rankVariants, rememberChoice, saveHints, type Ranking, type ScanHints } from "@/lib/variants";
+import { variantHashes } from "@/lib/phash";
+
+type HintSource = () => Promise<ScanHints | null>;
+// Las pistas se calculan una sola vez por lectura, aunque se pidan varias veces.
+const hintSource = (src: CanvasImageSource, card: { x: number; y: number; w: number; h: number } | null | undefined, code: string): HintSource => {
+  let p: Promise<ScanHints | null> | null = null;
+  return () => (p ??= card ? readHints(src, card, code).catch(() => null) : Promise.resolve(null));
+};
 
 type Mode = "single" | "bulk";
 const MODE_KEY = "opmc.scanMode.v1";
 const SLINGER_KEY = "opmc.slinger.v1";
 
-type Picker = { code: string; variants: Variant[]; resolve: (v: Variant | null) => void };
+type Picker = { code: string; variants: Variant[]; ranking: Ranking | null; resolve: (v: Variant | null) => void };
 type Banner = { title: string; detail: string; image?: string; resolve: (ok: boolean) => void };
 
 type Status = { text: string; tone?: "error" | "ok" };
@@ -49,8 +58,8 @@ export default function ScanPage() {
   const [picker, setPicker] = useState<Picker | null>(null);
   const [banner, setBanner] = useState<Banner | null>(null);
 
-  const askVariant = (code: string, variants: Variant[]) =>
-    new Promise<Variant | null>((resolve) => setPicker({ code, variants, resolve }));
+  const askVariant = (code: string, variants: Variant[], ranking: Ranking | null) =>
+    new Promise<Variant | null>((resolve) => setPicker({ code, variants, ranking, resolve }));
   const confirmRead = (b: Omit<Banner, "resolve">) =>
     new Promise<boolean>((resolve) => setBanner({ ...b, resolve }));
 
@@ -97,7 +106,7 @@ export default function ScanPage() {
   // a mano, se muestra el banner de 3 s para cancelar.
   // Devuelve true solo cuando se llena el lote (para detener el bucle).
   const variantsCache = useRef(new Map<string, Variant[]>());
-  const queueCode = useCallback(async (code: string, manual = false) => {
+  const queueCode = useCallback(async (code: string, manual = false, getHints?: HintSource) => {
     if (!manual && recentlySeen(code)) {
       markSeen(code); // la carta sigue frente a la cámara
       return false;
@@ -115,20 +124,33 @@ export default function ScanPage() {
     }
     if (!manual) scanFeedback();
     let chosen = baseVariant(variants);
+    let ranking: Ranking | null = null;
     if (variants.length > 1) {
-      const v = await askVariant(code, variants);
-      setPicker(null);
-      if (!v) {
-        markSeen(code);
-        setStatus({ text: `Lectura de ${code} descartada` });
-        return false;
+      // Pistas del escaneo (rareza, sello, hash de imagen) + última elección
+      const hints = getHints ? await getHints() : null;
+      const hashes = hints?.hash ? await variantHashes(variants) : {};
+      ranking = rankVariants(variants, hints, hashes, lastChoice(code));
+      // Sin ambigüedad (y con pistas reales) se salta el selector: el banner
+      // de 3 s sigue permitiendo cancelar.
+      if (hints && !ranking.ambiguous && ranking.best) {
+        chosen = ranking.best;
+      } else {
+        const v = await askVariant(code, variants, ranking);
+        setPicker(null);
+        if (!v) {
+          markSeen(code);
+          setStatus({ text: `Lectura de ${code} descartada` });
+          return false;
+        }
+        chosen = v;
       }
-      chosen = v;
+      rememberChoice(code, chosen.variantId);
     }
+    const detected = hintSummary(ranking);
     if (!manual) {
       const ok = await confirmRead({
         title: chosen.fullName || chosen.name,
-        detail: `${code} · ${chosen.label} · se añadirá a la cola`,
+        detail: `${code} · ${chosen.label} · se añadirá a la cola${detected ? ` · ${detected}` : ""}`,
         image: chosen.image,
       });
       setBanner(null);
@@ -153,8 +175,8 @@ export default function ScanPage() {
   }, []);
 
   const goTo = useCallback(
-    async (code: string) => {
-      if (modeRef.current === "bulk") return queueCode(code);
+    async (code: string, getHints?: HintSource) => {
+      if (modeRef.current === "bulk") return queueCode(code, false, getHints);
       if (triedRef.current.has(code)) return false;
       triedRef.current.add(code);
       setStatus({ text: `Leí ${code}, buscando…` });
@@ -163,6 +185,7 @@ export default function ScanPage() {
         setFound(true);
         scanFeedback();
         const data = await res.json().catch(() => null);
+        const hintsP = data?.variants?.length > 1 && getHints ? getHints() : null;
         const v = data?.variants?.length ? baseVariant(data.variants as Variant[]) : null;
         const ok = await confirmRead({ title: v?.name ?? code, detail: `${code} · abriendo la carta`, image: v?.image });
         setBanner(null);
@@ -173,6 +196,8 @@ export default function ScanPage() {
           return false;
         }
         runningRef.current = false;
+        const hints = hintsP ? await hintsP : null;
+        if (hints) saveHints(code, hints);
         router.push(`/carta/${code}`);
         return true;
       }
@@ -234,10 +259,11 @@ export default function ScanPage() {
         // zona visible del video: ahí se busca la carta (aunque esté fuera del marco)
         const view = { x: -ox / s, y: -oy / s, w: box.clientWidth / s, h: box.clientHeight / s };
         try {
-          const { codes, text, preview } = await readCardCodeOnce(video, card, view, n++);
+          const { codes, text, preview, card: det } = await readCardCodeOnce(video, card, view, n++);
           if (text.trim()) setLastText(text.trim());
           if (preview && n % 3 === 1) setPreview(preview);
-          for (const c of codes) if (await goTo(c)) return;
+          const shot = codes.length ? snapshot(video) : null;
+          for (const c of codes) if (await goTo(c, hintSource(shot!, det ?? card, c))) return;
         } catch (e) {
           setStatus({ text: "Error del lector: " + (e as Error).message, tone: "error" });
         }
@@ -306,10 +332,10 @@ export default function ScanPage() {
     img.src = URL.createObjectURL(file);
     await img.decode();
     try {
-      const { codes, text, preview } = await readCardCode(img, { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
+      const { codes, text, preview, card } = await readCardCode(img, { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
       setLastText(text.trim() || "(sin texto)");
       if (preview) setPreview(preview);
-      for (const c of codes) if (await goTo(c)) return;
+      for (const c of codes) if (await goTo(c, hintSource(img, card, c))) return;
       if (modeRef.current === "bulk" && codes.length) return;
       setStatus({ text: "No encontré el código en la foto. Acércate más a la carta o escríbelo abajo.", tone: "error" });
     } finally {
@@ -380,7 +406,7 @@ export default function ScanPage() {
         </div>
       )}
       {reviewing && <BulkPanel onDone={resume} />}
-      {picker && <VariantPicker code={picker.code} variants={picker.variants} onPick={picker.resolve} />}
+      {picker && <VariantPicker code={picker.code} variants={picker.variants} ranking={picker.ranking} onPick={picker.resolve} />}
 
       <div className="scanner" ref={boxRef}>
         <video ref={videoRef} playsInline muted />
