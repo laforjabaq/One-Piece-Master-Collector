@@ -1,5 +1,6 @@
-// Service worker: guarda la app y el motor de OCR para que abra rápido y sin conexión.
-const VERSION = "opmc-v1";
+// Service worker: guarda la app, el motor de OCR y el de embeddings (el modelo
+// lo guarda el propio worker en la caché opmc-models-v1, que aquí no se borra) para que abra rápido y sin conexión.
+const VERSION = "opmc-v2";
 const STATIC = `${VERSION}-static`;
 const PAGES = `${VERSION}-pages`;
 const IMAGES = `${VERSION}-images`;
@@ -11,7 +12,7 @@ self.addEventListener("install", (e) => {
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k)))),
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => !k.startsWith(VERSION) && !k.startsWith("opmc-models")).map((k) => caches.delete(k)))),
   );
   self.clients.claim();
 });
@@ -31,7 +32,7 @@ self.addEventListener("fetch", (e) => {
 
   if (url.origin === location.origin) {
     if (url.pathname.startsWith("/api/")) return; // datos siempre frescos
-    if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/tesseract/") || /\.(png|svg|webmanifest)$/.test(url.pathname)) {
+    if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/tesseract/") || url.pathname.startsWith("/ort/") || url.pathname.startsWith("/embed/") || /\.(png|svg|webmanifest)$/.test(url.pathname)) {
       e.respondWith(cacheFirst(req, STATIC));
       return;
     }

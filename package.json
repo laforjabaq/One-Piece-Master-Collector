@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "postinstall": "node scripts/copy-tesseract.mjs",
+    "postinstall": "node scripts/copy-tesseract.mjs && node scripts/copy-ort.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -12,6 +12,7 @@
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
     "next": "^16.4.2",
+    "onnxruntime-web": "1.30.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tesseract.js": "^7.0.0"

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Variant } from "@/lib/optcg";
 import { usd } from "@/lib/collection";
+import { VariantFilters, useFiltered } from "./VariantFilters";
 
 type Props = { code: string; variantId?: string; onClose: () => void; actions?: React.ReactNode };
 
@@ -40,7 +41,11 @@ export function CardModal({ code, variantId, onClose, actions }: Props) {
     };
   }, [onClose]);
 
-  const v = variants?.find((x) => x.variantId === sel) ?? variants?.[0];
+  const { filters, setFilters, list } = useFiltered(variants ?? []);
+  useEffect(() => {
+    if (list.length && !list.some((x) => x.variantId === sel)) setSel(list[0].variantId);
+  }, [list, sel]);
+  const v = list.find((x) => x.variantId === sel) ?? variants?.find((x) => x.variantId === sel) ?? variants?.[0];
   const rows: [string, string][] = v
     ? [
         ["Código", v.code],
@@ -70,9 +75,10 @@ export function CardModal({ code, variantId, onClose, actions }: Props) {
             <img className="modal-img" src={v.image} alt={v.fullName} decoding="async" />
             <h2 style={{ margin: "12px 0 2px" }}>{v.name}</h2>
             {v.fullName !== v.name && <p className="sub" style={{ marginBottom: 8 }}>{v.fullName}</p>}
-            {variants!.length > 1 && (
+            {variants!.length > 1 && <VariantFilters variants={variants!} filters={filters} onChange={setFilters} />}
+            {list.length > 1 && (
               <select className="input" value={v.variantId} onChange={(e) => setSel(e.target.value)} aria-label="Versión">
-                {variants!.map((x) => (
+                {list.map((x) => (
                   <option key={x.variantId} value={x.variantId}>{x.label} · {usd(x.price)}</option>
                 ))}
               </select>

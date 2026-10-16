@@ -37,3 +37,20 @@ La cámara del navegador solo funciona en **HTTPS** (o en `localhost`). Para pro
 - `lib/ocr.ts` — preprocesado de imagen y Tesseract
 - `lib/collection.ts` — guardado local
 - `public/sw.js`, `public/manifest.webmanifest` — PWA
+
+## Reconocimiento por arte (en el dispositivo, gratis)
+
+Cuando un código tiene varias versiones, la app compara la ilustración de la carta
+detectada con las imágenes de cada versión usando embeddings de imagen
+(DINOv2-small, licencia Apache-2.0) con ONNX Runtime Web en un Web Worker
+(WebGPU si hay, si no WASM). Sin API keys ni servicios de pago.
+
+- El modelo se descarga de Hugging Face la primera vez que hace falta (~23 MB int8
+  en WASM, ~44 MB fp16 en WebGPU, más el motor ONNX en `/public/ort`) y queda en la
+  caché del navegador para funcionar sin conexión.
+- Los vectores de las imágenes de referencia se calculan al vuelo (vía `/api/img`)
+  y se guardan en IndexedDB.
+- Se activa o desactiva con el botón "Reconocimiento por arte" del escáner. Si el
+  modelo no carga, se sigue con el código, los sellos y el hash como antes.
+- Margen para aceptar sola (similitud coseno de la 1.ª sobre la 2.ª):
+  `localStorage["opmc.artMargin.v1"]` (por defecto 0.04).
