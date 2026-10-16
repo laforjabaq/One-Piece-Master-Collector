@@ -1,0 +1,52 @@
+// Service worker: guarda la app y el motor de OCR para que abra rápido y sin conexión.
+const VERSION = "opmc-v1";
+const STATIC = `${VERSION}-static`;
+const PAGES = `${VERSION}-pages`;
+const IMAGES = `${VERSION}-images`;
+
+self.addEventListener("install", (e) => {
+  e.waitUntil(caches.open(PAGES).then((c) => c.addAll(["/", "/escanear", "/buscar"])).catch(() => {}));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (e) => {
+  e.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k)))),
+  );
+  self.clients.claim();
+});
+
+const cacheFirst = async (req, name) => {
+  const hit = await caches.match(req);
+  if (hit) return hit;
+  const res = await fetch(req);
+  if (res.ok || res.type === "opaque") (await caches.open(name)).put(req, res.clone());
+  return res;
+};
+
+self.addEventListener("fetch", (e) => {
+  const req = e.request;
+  if (req.method !== "GET") return;
+  const url = new URL(req.url);
+
+  if (url.origin === location.origin) {
+    if (url.pathname.startsWith("/api/")) return; // datos siempre frescos
+    if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/tesseract/") || /\.(png|svg|webmanifest)$/.test(url.pathname)) {
+      e.respondWith(cacheFirst(req, STATIC));
+      return;
+    }
+    if (req.mode === "navigate") {
+      e.respondWith(
+        fetch(req)
+          .then((res) => {
+            caches.open(PAGES).then((c) => c.put(req, res.clone()));
+            return res;
+          })
+          .catch(async () => (await caches.match(req)) || caches.match("/")),
+      );
+    }
+    return;
+  }
+
+  if (req.destination === "image") e.respondWith(cacheFirst(req, IMAGES).catch(() => fetch(req)));
+});

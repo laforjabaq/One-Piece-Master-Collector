@@ -1,0 +1,8 @@
+node_modules
+.next
+out
+public/tesseract
+next-env.d.ts
+*.tsbuildinfo
+.env*.local
+.vercel
