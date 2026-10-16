@@ -13,11 +13,13 @@ export function VariantPicker({
   code,
   variants,
   ranking,
+  funnel,
   onPick,
 }: {
   code: string;
   variants: Variant[];
   ranking?: Ranking | null;
+  funnel?: string;
   onPick: (v: Variant | null) => void;
 }) {
   const ordered = ranking ? ranking.ranked.map((r) => r.variant) : variants;
@@ -32,6 +34,7 @@ export function VariantPicker({
         <p className="sub">
           {variants[0]?.name} ({code}) tiene {variants.length} versiones. Toca la que tienes en la mano.
         </p>
+        {funnel && <p className="hint-line" data-testid="funnel">{funnel}</p>}
         {summary && <p className="hint-line" data-testid="hint-summary">{summary}</p>}
         <VariantFilters variants={ordered} filters={filters} onChange={setFilters} />
         {list.length === 1 && (
@@ -74,11 +77,13 @@ export function ReadBanner({
   title,
   detail,
   image,
+  funnel,
   onDone,
 }: {
   title: string;
   detail: string;
   image?: string;
+  funnel?: string;
   onDone: (accepted: boolean) => void;
 }) {
   const done = useRef(onDone);
@@ -94,6 +99,7 @@ export function ReadBanner({
       <div className="read-banner-body">
         <div className="item-title">{title}</div>
         <div className="item-meta">{detail}</div>
+        {funnel && <div className="item-meta" data-testid="funnel">{funnel}</div>}
       </div>
       <button className="btn small" onClick={() => done.current(false)}>Cancelar</button>
       <div className="read-banner-bar" style={{ animationDuration: `${CANCEL_MS}ms` }} />
