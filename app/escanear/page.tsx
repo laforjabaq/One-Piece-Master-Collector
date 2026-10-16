@@ -3,6 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getWorker, readCardCode, readCardCodeOnce } from "@/lib/ocr";
 import { normalizeCode } from "@/lib/code";
+import { scanFeedback, unlockAudio } from "@/lib/feedback";
+import { BulkPanel } from "./bulk";
+import { enqueue, getBatchSize, queueCount, readQueue, setBatchSize, useQueue } from "@/lib/bulk";
+import type { Variant } from "@/lib/optcg";
+
+type Mode = "single" | "bulk";
+const MODE_KEY = "opmc.scanMode.v1";
 
 type Status = { text: string; tone?: "error" | "ok" };
 const CARD_RATIO = 63 / 88;
@@ -22,6 +29,14 @@ export default function ScanPage() {
   const [manual, setManual] = useState("");
   const [lastText, setLastText] = useState("");
   const [preview, setPreview] = useState("");
+  const [mode, setModeState] = useState<Mode>("single");
+  const [batch, setBatch] = useState(30);
+  const [reviewing, setReviewing] = useState(false);
+  const queue = useQueue();
+  const modeRef = useRef<Mode>("single");
+  const batchRef = useRef(30);
+  modeRef.current = mode;
+  batchRef.current = batch;
   const frameRef = useRef(frame);
   frameRef.current = frame;
 
@@ -41,15 +56,63 @@ export default function ScanPage() {
     return () => window.removeEventListener("resize", layout);
   }, [layout]);
 
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(MODE_KEY) === "bulk") setModeState("bulk");
+    } catch {
+      /* nada */
+    }
+    setBatch(getBatchSize());
+  }, []);
+
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      /* nada */
+    }
+  };
+
+  // Modo bulk: cada lectura válida va a la cola y se sigue escaneando.
+  // Devuelve true solo cuando se llena el lote (para detener el bucle).
+  const variantsCache = useRef(new Map<string, Variant[]>());
+  const queueCode = useCallback(async (code: string, force = false) => {
+    let variants = variantsCache.current.get(code);
+    if (!variants) {
+      const res = await fetch(`/api/card/${encodeURIComponent(code)}`).catch(() => null);
+      const data = res?.ok ? await res.json().catch(() => null) : null;
+      if (!data?.variants?.length) {
+        setStatus({ text: `${code} no aparece en la base, sigo intentando…`, tone: "error" });
+        return false;
+      }
+      variants = data.variants as Variant[];
+      variantsCache.current.set(code, variants);
+    }
+    if (enqueue(code, variants, { force })) {
+      scanFeedback();
+      setFound(true);
+      setTimeout(() => setFound(false), 400);
+      setStatus({ text: `✓ ${variants[0].name} (${code}) en la cola`, tone: "ok" });
+    }
+    if (queueCount(readQueue()) >= batchRef.current) {
+      runningRef.current = false;
+      setReviewing(true);
+      return true;
+    }
+    return false;
+  }, []);
+
   const goTo = useCallback(
     async (code: string) => {
+      if (modeRef.current === "bulk") return queueCode(code);
       if (triedRef.current.has(code)) return false;
       triedRef.current.add(code);
       setStatus({ text: `Leí ${code}, buscando…` });
       const res = await fetch(`/api/card/${encodeURIComponent(code)}`).catch(() => null);
       if (res?.ok) {
         setFound(true);
-        navigator.vibrate?.(80);
+        scanFeedback();
         runningRef.current = false;
         router.push(`/carta/${code}`);
         return true;
@@ -58,7 +121,7 @@ export default function ScanPage() {
       setTimeout(() => triedRef.current.delete(code), 4000);
       return false;
     },
-    [router],
+    [router, queueCode],
   );
 
   const stop = useCallback(() => {
@@ -154,6 +217,7 @@ export default function ScanPage() {
       const { codes, text } = await readCardCode(img, { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
       setLastText(text.trim());
       for (const c of codes) if (await goTo(c)) return;
+      if (modeRef.current === "bulk" && codes.length) return;
       setStatus({ text: "No encontré el código en la foto. Acércate más a la carta o escríbelo abajo.", tone: "error" });
     } finally {
       URL.revokeObjectURL(img.src);
@@ -167,14 +231,62 @@ export default function ScanPage() {
       setStatus({ text: "Ese código no tiene el formato esperado (ej. OP05-119, ST10-002, P-041).", tone: "error" });
       return;
     }
+    if (mode === "bulk") {
+      setManual("");
+      queueCode(code, true);
+      return;
+    }
     stop();
     router.push(`/carta/${code}`);
   };
+
+  const openReview = () => {
+    runningRef.current = false;
+    setReviewing(true);
+  };
+
+  const resume = () => {
+    setReviewing(false);
+    variantsCache.current.clear();
+    if (streamRef.current && !runningRef.current) {
+      setStatus({ text: "Sigue escaneando el siguiente lote" });
+      runningRef.current = true;
+      loop();
+    }
+  };
+
+  const count = queueCount(queue);
 
   return (
     <>
       <h1>Escanear</h1>
       <p className="sub">Coloca la carta dentro del marco. Se detecta sola. En PC puedes usar la webcam o subir una foto.</p>
+
+      <div className="seg" role="tablist" aria-label="Modo de escaneo" onPointerDown={unlockAudio}>
+        <button role="tab" aria-selected={mode === "single"} className={mode === "single" ? "on" : ""} onClick={() => setMode("single")}>1 a 1</button>
+        <button role="tab" aria-selected={mode === "bulk"} className={mode === "bulk" ? "on" : ""} onClick={() => setMode("bulk")}>Bulk</button>
+      </div>
+      {mode === "bulk" && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <span className="pill" data-testid="queue-count" style={{ fontSize: "0.9rem" }}>En cola: {count} / {batch}</span>
+          <select
+            className="input"
+            style={{ flex: "none", width: "auto" }}
+            aria-label="Tamaño del lote"
+            value={batch}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              setBatch(n);
+              setBatchSize(n);
+            }}
+          >
+            <option value={30}>Lote de 30</option>
+            <option value={50}>Lote de 50</option>
+          </select>
+          <button className="btn primary small" onClick={openReview} disabled={!queue.length}>Revisar</button>
+        </div>
+      )}
+      {reviewing && <BulkPanel onDone={resume} />}
 
       <div className="scanner" ref={boxRef}>
         <video ref={videoRef} playsInline muted />
@@ -213,7 +325,7 @@ export default function ScanPage() {
           autoCorrect="off"
           spellCheck={false}
         />
-        <button className="btn primary" type="submit">Ir</button>
+        <button className="btn primary" type="submit">{mode === "bulk" ? "Añadir" : "Ir"}</button>
       </form>
 
       {lastText && (

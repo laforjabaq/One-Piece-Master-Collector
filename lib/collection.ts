@@ -13,6 +13,10 @@ export type Entry = {
   setName: string;
   price: number | null;
   qty: number;
+  fullName?: string;
+  // true = carta registrada con el escaneo en lote (sección "Bulk").
+  // Se guarda con la clave `${variantId}|bulk` para no mezclarla con la normal.
+  bulk?: boolean;
   addedAt: string;
   updatedAt: string;
 };
@@ -64,20 +68,36 @@ export function useCollection(): Collection {
   );
 }
 
+export const entryKey = (e: { variantId: string; bulk?: boolean }) => (e.bulk ? `${e.variantId}|bulk` : e.variantId);
+
+export function ownedQty(col: Collection, variantId: string): number {
+  return (col[variantId]?.qty ?? 0) + (col[`${variantId}|bulk`]?.qty ?? 0);
+}
+
 export function addToCollection(card: Omit<Entry, "qty" | "addedAt" | "updatedAt">, qty: number) {
+  addManyToCollection([{ card, qty }]);
+}
+
+export function addManyToCollection(items: { card: Omit<Entry, "qty" | "addedAt" | "updatedAt">; qty: number }[]) {
   const col = { ...read() };
   const now = new Date().toISOString();
-  const prev = col[card.variantId];
-  col[card.variantId] = {
+  for (const { card, qty } of items) addInto(col, card, qty, now);
+  write(col);
+}
+
+function addInto(col: Collection, card: Omit<Entry, "qty" | "addedAt" | "updatedAt">, qty: number, now: string) {
+  const key = entryKey(card);
+  const prev = col[key];
+  col[key] = {
     ...card,
     qty: (prev?.qty ?? 0) + qty,
     addedAt: prev?.addedAt ?? now,
     updatedAt: now,
   };
-  write(col);
 }
 
 export function setQty(variantId: string, qty: number) {
+  // variantId aquí es la clave de la entrada (ver entryKey)
   const col = { ...read() };
   if (!col[variantId]) return;
   if (qty <= 0) delete col[variantId];
@@ -94,7 +114,7 @@ export function importCollection(json: string): number {
   const cards: Entry[] = Array.isArray(data) ? data : data.cards;
   if (!Array.isArray(cards)) throw new Error("Archivo no válido");
   const col = { ...read() };
-  for (const c of cards) if (c && c.variantId && c.qty > 0) col[c.variantId] = c;
+  for (const c of cards) if (c && c.variantId && c.qty > 0) col[entryKey(c)] = c;
   write(col);
   return cards.length;
 }

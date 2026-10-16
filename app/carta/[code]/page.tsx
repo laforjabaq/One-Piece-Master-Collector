@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import type { Variant } from "@/lib/optcg";
-import { addToCollection, useCollection, usd } from "@/lib/collection";
+import { addToCollection, ownedQty, useCollection, usd } from "@/lib/collection";
+import { CardModal } from "@/components/CardModal";
 
 export default function CardPage() {
   const { code } = useParams<{ code: string }>();
@@ -14,6 +15,7 @@ export default function CardPage() {
   const [selected, setSelected] = useState<string>("");
   const [qty, setQty] = useState(1);
   const [toast, setToast] = useState("");
+  const [detail, setDetail] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -40,6 +42,7 @@ export default function CardPage() {
         variantId: current.variantId,
         code: current.code,
         name: current.name,
+        fullName: current.fullName,
         label: current.label,
         image: current.image,
         rarity: current.rarity,
@@ -87,7 +90,7 @@ export default function CardPage() {
       </p>
       <div className="variants">
         {variants.map((v) => {
-          const owned = collection[v.variantId]?.qty ?? 0;
+          const owned = ownedQty(collection, v.variantId);
           return (
             <button
               key={v.variantId}
@@ -95,11 +98,24 @@ export default function CardPage() {
               onClick={() => setSelected(v.variantId)}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={v.image} alt={`${v.name} ${v.label}`} loading="lazy" />
+              <img src={v.image} alt={`${v.name} ${v.label}`} loading="lazy" decoding="async" width={140} height={196} />
               {owned > 0 && <span className="variant-owned">×{owned}</span>}
               <div className="variant-label">{v.label}</div>
               {v.setName && v.setName !== first.setName && <div className="item-meta">{v.setName}</div>}
               <div className="item-meta">{v.price != null ? `${usd(v.price)} TCGplayer` : "Sin precio"}</div>
+              <span
+                role="button"
+                tabIndex={0}
+                className="pill"
+                style={{ marginTop: 6, display: "inline-block", cursor: "pointer" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDetail(v.variantId);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && setDetail(v.variantId)}
+              >
+                Ver detalle
+              </span>
             </button>
           );
         })}
@@ -121,6 +137,7 @@ export default function CardPage() {
         </div>
       </div>
       {toast && <div className="toast">{toast}</div>}
+      {detail && <CardModal code={first.code} variantId={detail} onClose={() => setDetail(null)} />}
     </>
   );
 }

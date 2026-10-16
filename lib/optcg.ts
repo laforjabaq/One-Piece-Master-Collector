@@ -14,6 +14,14 @@ export type Variant = {
   color: string;
   type: string;
   price: number | null; // precio de mercado TCGplayer (USD)
+  fullName: string; // nombre completo como en TCGplayer, ej. "Monkey.D.Luffy (Winner)"
+  cost: string;
+  power: string;
+  counter: string;
+  attribute: string;
+  subTypes: string;
+  life: string;
+  text: string;
 };
 
 export type CardSummary = {
@@ -24,6 +32,8 @@ export type CardSummary = {
   color: string;
   image: string;
   variants: number;
+  // Todos los nombres completos de sus versiones (para buscar "Winner", "Manga"...)
+  names: string[];
 };
 
 type Raw = Record<string, unknown>;
@@ -71,7 +81,8 @@ export function normalize(r: Raw): Variant | null {
   const code = str(r, "card_set_id", "card_id", "id").toUpperCase();
   if (!code) return null;
   const variantId = str(r, "card_image_id") || code;
-  const { name, tags } = splitName(str(r, "card_name", "name"), code);
+  const fullName = str(r, "card_name", "name", "product_name", "full_name");
+  const { name, tags } = splitName(fullName, code);
   return {
     variantId,
     code,
@@ -83,6 +94,14 @@ export function normalize(r: Raw): Variant | null {
     color: str(r, "card_color", "color"),
     type: str(r, "card_type", "type"),
     price: num(r, "market_price", "inventory_price"),
+    fullName: fullName || code,
+    cost: str(r, "card_cost", "cost"),
+    power: str(r, "card_power", "power"),
+    counter: str(r, "counter_amount", "counter"),
+    attribute: str(r, "attribute", "card_attribute"),
+    subTypes: str(r, "sub_types", "subtypes"),
+    life: str(r, "life"),
+    text: str(r, "card_text", "effect", "text"),
   };
 }
 
@@ -150,6 +169,7 @@ export async function getAllCards(): Promise<CardSummary[]> {
     const g = groups.get(v.code);
     if (g) {
       g.variants++;
+      if (!g.names.includes(v.fullName)) g.names.push(v.fullName);
       if (!v.variantId.includes("_") && v.image) {
         g.image = v.image;
         g.setName = v.setName;
@@ -163,6 +183,7 @@ export async function getAllCards(): Promise<CardSummary[]> {
         color: v.color,
         image: v.image,
         variants: 1,
+        names: [v.fullName],
       });
     }
   }
