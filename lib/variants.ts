@@ -84,7 +84,21 @@ export type ScanHints = {
   rarity?: string; // C, UC, R, SR, SEC, L, SP, P
   stamps: string[]; // WINNER, JUDGE, PRE-RELEASE, CHAMPIONSHIP, ANNIVERSARY...
   hash?: string; // dHash de 64 bits en hex
+  art?: ArtScores; // similitud de arte con cada candidata (embeddings en el dispositivo)
 };
+
+export type ArtScores = {
+  /** variantId -> similitud coseno del arte (carta completa) */
+  art: Record<string, number>;
+  /** variantId -> similitud de la zona del sello, solo entre versiones con el mismo arte */
+  stamp?: Record<string, number>;
+  /** ventaja mínima (coseno) de la 1.ª sobre la 2.ª para no preguntar */
+  margin: number;
+};
+
+// Puntos del ranking que vale exactamente el margen de arte: así una ventaja
+// igual al margen equivale al hueco que hace falta para aceptar sola.
+const GAP = 1.5;
 
 const STAMPS: [string, RegExp][] = [
   ["WINNER", /W[I1l]NN[E3]R/],
@@ -130,8 +144,8 @@ export function hamming(a: string, b: string): number {
   return d;
 }
 
-export type Ranked = { variant: Variant; score: number; why: string[] };
-export type Ranking = { ranked: Ranked[]; best: Variant | null; ambiguous: boolean; matched: string[] };
+export type Ranked = { variant: Variant; score: number; why: string[]; art?: number };
+export type Ranking = { ranked: Ranked[]; best: Variant | null; ambiguous: boolean; matched: string[]; art?: number };
 
 /**
  * Ordena las versiones por las pistas del escaneo, el hash de imagen
@@ -139,7 +153,13 @@ export type Ranking = { ranked: Ranked[]; best: Variant | null; ambiguous: boole
  */
 export function rankVariants(vs: Variant[], hints: ScanHints | null, hashes: Record<string, string> = {}, last?: string): Ranking {
   const matched = new Set<string>();
-  const ranked = vs.map((variant) => {
+  const art = hints?.art;
+  const artVals = art ? Object.values(art.art) : [];
+  const artMax = artVals.length ? Math.max(...artVals) : 0;
+  const stampVals = art?.stamp ? Object.values(art.stamp) : [];
+  const stampMax = stampVals.length ? Math.max(...stampVals) : 0;
+  const k = GAP / (art?.margin || 0.04);
+  const ranked: Ranked[] = vs.map((variant) => {
     const m = metaOf(variant);
     const why: string[] = [];
     let score = 0;
@@ -164,24 +184,37 @@ export function rankVariants(vs: Variant[], hints: ScanHints | null, hashes: Rec
       if (hints.hash && h) {
         const d = hamming(hints.hash, h);
         // 0 bits = idéntica (+3); 32 o más = no se parece (≤0)
-        score += Math.max(-1, 3 * (1 - d / 24));
+        // Con arte, el hash es un desempate débil (es sensible a reflejos y recorte)
+        score += (art ? 0.3 : 1) * Math.max(-1, 3 * (1 - d / 24));
+      }
+      const a = art?.art[variant.variantId];
+      if (a !== undefined) {
+        // 0 para la que más se parece; negativo según lo que se aleja (tope -6)
+        score += Math.max(-6, k * (a - artMax));
+        const st = art?.stamp?.[variant.variantId];
+        if (st !== undefined && stampVals.length > 1) score += Math.max(-3, k * (st - stampMax));
       }
     }
     if (last && variant.variantId === last) {
       score += 0.75;
       why.push("última elegida");
     }
-    return { variant, score, why };
+    const a = art?.art[variant.variantId];
+    return a === undefined ? { variant, score, why } : { variant, score, why, art: a };
   });
   ranked.sort((a, b) => b.score - a.score);
   const gap = ranked.length > 1 ? ranked[0].score - ranked[1].score : Infinity;
   return {
     ranked,
     best: ranked[0]?.variant ?? null,
-    ambiguous: ranked.length > 1 && gap < 1.5,
+    ambiguous: ranked.length > 1 && gap < GAP,
     matched: [...matched],
+    art: ranked[0]?.art,
   };
 }
+
+/** "Coincidencia de arte: 92%" */
+export const artLabel = (sim?: number) => (sim === undefined ? "" : `Coincidencia de arte: ${Math.round(Math.max(0, Math.min(1, sim)) * 100)}%`);
 
 // ---------- Recordar la última elección por código ----------
 
@@ -222,4 +255,5 @@ export function takeHints(code: string): ScanHints | null {
   return null;
 }
 
-export const hintSummary = (r: Ranking | null) => (r?.matched.length ? `Detectado: ${r.matched.join(" · ")}` : "");
+export const hintSummary = (r: Ranking | null) =>
+  [r?.matched.length ? `Detectado: ${r.matched.join(" · ")}` : "", artLabel(r?.art)].filter(Boolean).join(" · ");

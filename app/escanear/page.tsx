@@ -10,12 +10,21 @@ import { ReadBanner, VariantPicker } from "./confirm";
 import type { Variant } from "@/lib/optcg";
 import { hintSummary, lastChoice, rankVariants, rememberChoice, saveHints, type Ranking, type ScanHints } from "@/lib/variants";
 import { variantHashes } from "@/lib/phash";
+import { artMatch, setArtEnabled, useArtEnabled } from "@/lib/embed";
+import { ArtModelNotice } from "./art-notice";
 
-type HintSource = () => Promise<ScanHints | null>;
-// Las pistas se calculan una sola vez por lectura, aunque se pidan varias veces.
+type HintSource = (variants: Variant[]) => Promise<ScanHints | null>;
+// Las pistas se calculan una sola vez por lectura, aunque se pidan varias veces:
+// OCR de rareza/sello y hash (worker de Tesseract) en paralelo con la
+// comparación de arte (worker de embeddings) contra las candidatas.
 const hintSource = (src: CanvasImageSource, card: { x: number; y: number; w: number; h: number } | null | undefined, code: string): HintSource => {
   let p: Promise<ScanHints | null> | null = null;
-  return () => (p ??= card ? readHints(src, card, code).catch(() => null) : Promise.resolve(null));
+  return (variants) =>
+    (p ??= card
+      ? Promise.all([readHints(src, card, code).catch(() => null), artMatch(src, card, variants)]).then(([h, art]) =>
+          h || art ? { stamps: [], ...h, ...(art ? { art } : {}) } : null,
+        )
+      : Promise.resolve(null));
 };
 
 type Mode = "single" | "bulk";
@@ -57,6 +66,7 @@ export default function ScanPage() {
   const [zoom, setZoom] = useState(1); // zoom de cámara aplicado (1 = sin zoom)
   const [picker, setPicker] = useState<Picker | null>(null);
   const [banner, setBanner] = useState<Banner | null>(null);
+  const artOn = useArtEnabled();
 
   const askVariant = (code: string, variants: Variant[], ranking: Ranking | null) =>
     new Promise<Variant | null>((resolve) => setPicker({ code, variants, ranking, resolve }));
@@ -127,7 +137,7 @@ export default function ScanPage() {
     let ranking: Ranking | null = null;
     if (variants.length > 1) {
       // Pistas del escaneo (rareza, sello, hash de imagen) + última elección
-      const hints = getHints ? await getHints() : null;
+      const hints = getHints ? await getHints(variants) : null;
       const hashes = hints?.hash ? await variantHashes(variants) : {};
       ranking = rankVariants(variants, hints, hashes, lastChoice(code));
       // Sin ambigüedad (y con pistas reales) se salta el selector: el banner
@@ -185,7 +195,7 @@ export default function ScanPage() {
         setFound(true);
         scanFeedback();
         const data = await res.json().catch(() => null);
-        const hintsP = data?.variants?.length > 1 && getHints ? getHints() : null;
+        const hintsP = data?.variants?.length > 1 && getHints ? getHints(data.variants) : null;
         const v = data?.variants?.length ? baseVariant(data.variants as Variant[]) : null;
         const ok = await confirmRead({ title: v?.name ?? code, detail: `${code} · abriendo la carta`, image: v?.image });
         setBanner(null);
@@ -432,7 +442,17 @@ export default function ScanPage() {
         >
           {slinger ? "Modo slinger / Distancia ✓" : "Modo slinger / Distancia"}
         </button>
+        <button
+          className={"btn small" + (artOn ? " primary" : "")}
+          aria-pressed={artOn}
+          onClick={() => setArtEnabled(!artOn)}
+          style={{ flex: 1 }}
+          title="Compara la ilustración con las versiones del mismo código, en tu dispositivo"
+        >
+          {artOn ? "Reconocimiento por arte ✓" : "Reconocimiento por arte"}
+        </button>
       </div>
+      <ArtModelNotice />
 
       <div className="spacer" />
       <div className="row">

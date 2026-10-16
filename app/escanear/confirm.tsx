@@ -2,7 +2,7 @@
 import { useEffect, useRef } from "react";
 import type { Variant } from "@/lib/optcg";
 import { usd } from "@/lib/collection";
-import { hintSummary, metaLine, type Ranking } from "@/lib/variants";
+import { artLabel, hintSummary, metaLine, type Ranking } from "@/lib/variants";
 import { VariantFilters, useFiltered } from "@/components/VariantFilters";
 
 export const CANCEL_MS = 3000;
@@ -24,6 +24,7 @@ export function VariantPicker({
   const { filters, setFilters, list } = useFiltered(ordered);
   const best = ranking?.best;
   const summary = hintSummary(ranking ?? null);
+  const artOf = new Map(ranking?.ranked.map((r) => [r.variant, r.art]) ?? []);
   return (
     <div className="modal-backdrop" role="presentation">
       <div className="modal" role="dialog" aria-modal="true" aria-label={`Elige la versión de ${code}`}>
@@ -57,6 +58,7 @@ export function VariantPicker({
               {best && v === best && <span className="badge">Sugerida</span>}
               <span className="variant-label">{v.label}</span>
               <span className="variant-meta">{metaLine(v)} · {usd(v.price)}</span>
+              {artOf.get(v) !== undefined && <span className="variant-meta" data-testid="art-score">{artLabel(artOf.get(v))}</span>}
             </button>
           ))}
         </div>
