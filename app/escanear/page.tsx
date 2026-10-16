@@ -1,7 +1,9 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getWorker, readCardCode, readCardCodeOnce, readHints, snapshot } from "@/lib/ocr";
+import { detectCard, getWorker, readCardCode, readCardCodeOnce, readCardName, readHints, snapshot } from "@/lib/ocr";
+import { loadNameIndex, matchName, nameIndexNow, type NameMatch } from "@/lib/names";
+import { decide, funnelLabel, type Funnel } from "@/lib/funnel";
 import { normalizeCode } from "@/lib/code";
 import { scanFeedback, unlockAudio } from "@/lib/feedback";
 import { BulkPanel } from "./bulk";
@@ -27,12 +29,30 @@ const hintSource = (src: CanvasImageSource, card: { x: number; y: number; w: num
       : Promise.resolve(null));
 };
 
+type Rect = { x: number; y: number; w: number; h: number };
+type NameStep = { text: string; matches: NameMatch[]; preview?: string };
+
+// Paso 1 del embudo: nombre leído sobre la carta detectada y emparejado con el
+// índice de nombres. null si no hay índice, carta o lectura útil.
+async function nameStep(src: CanvasImageSource, det: Rect | null): Promise<NameStep | null> {
+  if (!det) return null;
+  const index = nameIndexNow() ?? (await Promise.race([loadNameIndex(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]));
+  if (!index) return null;
+  const r = await readCardName(src, det, (t) => matchName(index, t).length > 0).catch(() => null);
+  if (!r) return null;
+  return { text: r.text, matches: matchName(index, r.text), preview: r.preview };
+}
+
+// Sin código, solo se acepta el nombre en vivo si encaja muy bien.
+const LIVE_NAME_ONLY = 0.85;
+const MAX_NAME_CODES = 8;
+
 type Mode = "single" | "bulk";
 const MODE_KEY = "opmc.scanMode.v1";
 const SLINGER_KEY = "opmc.slinger.v1";
 
-type Picker = { code: string; variants: Variant[]; ranking: Ranking | null; resolve: (v: Variant | null) => void };
-type Banner = { title: string; detail: string; image?: string; resolve: (ok: boolean) => void };
+type Picker = { code: string; variants: Variant[]; ranking: Ranking | null; funnel?: string; resolve: (v: Variant | null) => void };
+type Banner = { title: string; detail: string; image?: string; funnel?: string; resolve: (ok: boolean) => void };
 
 type Status = { text: string; tone?: "error" | "ok" };
 const CARD_RATIO = 63 / 88;
@@ -52,6 +72,8 @@ export default function ScanPage() {
   const [manual, setManual] = useState("");
   const [lastText, setLastText] = useState("");
   const [preview, setPreview] = useState("");
+  const [namePreview, setNamePreview] = useState("");
+  const [lastName, setLastName] = useState("");
   const [mode, setModeState] = useState<Mode>("single");
   const [batch, setBatch] = useState(30);
   const [reviewing, setReviewing] = useState(false);
@@ -68,8 +90,8 @@ export default function ScanPage() {
   const [banner, setBanner] = useState<Banner | null>(null);
   const artOn = useArtEnabled();
 
-  const askVariant = (code: string, variants: Variant[], ranking: Ranking | null) =>
-    new Promise<Variant | null>((resolve) => setPicker({ code, variants, ranking, resolve }));
+  const askVariant = (code: string, variants: Variant[], ranking: Ranking | null, funnel?: Funnel) =>
+    new Promise<Variant | null>((resolve) => setPicker({ code, variants, ranking, funnel: funnelLabel(funnel), resolve }));
   const confirmRead = (b: Omit<Banner, "resolve">) =>
     new Promise<boolean>((resolve) => setBanner({ ...b, resolve }));
 
@@ -116,12 +138,14 @@ export default function ScanPage() {
   // a mano, se muestra el banner de 3 s para cancelar.
   // Devuelve true solo cuando se llena el lote (para detener el bucle).
   const variantsCache = useRef(new Map<string, Variant[]>());
-  const queueCode = useCallback(async (code: string, manual = false, getHints?: HintSource) => {
-    if (!manual && recentlySeen(code)) {
-      markSeen(code); // la carta sigue frente a la cámara
+  // `pre`: candidatas ya reunidas por el embudo (varios códigos con el mismo nombre).
+  const queueCode = useCallback(async (code: string, manual = false, getHints?: HintSource, funnel?: Funnel, pre?: { key: string; variants: Variant[] }) => {
+    const seenKey = pre?.key ?? code;
+    if (!manual && recentlySeen(seenKey)) {
+      markSeen(seenKey); // la carta sigue frente a la cámara
       return false;
     }
-    let variants = variantsCache.current.get(code);
+    let variants = pre?.variants ?? variantsCache.current.get(code);
     if (!variants) {
       const res = await fetch(`/api/card/${encodeURIComponent(code)}`).catch(() => null);
       const data = res?.ok ? await res.json().catch(() => null) : null;
@@ -132,6 +156,8 @@ export default function ScanPage() {
       variants = data.variants as Variant[];
       variantsCache.current.set(code, variants);
     }
+    if (funnel && !pre) funnel.code = { code, count: variants.length };
+    const label = pre?.key ?? code;
     if (!manual) scanFeedback();
     let chosen = baseVariant(variants);
     let ranking: Ranking | null = null;
@@ -139,22 +165,28 @@ export default function ScanPage() {
       // Pistas del escaneo (rareza, sello, hash de imagen) + última elección
       const hints = getHints ? await getHints(variants) : null;
       const hashes = hints?.hash ? await variantHashes(variants) : {};
-      ranking = rankVariants(variants, hints, hashes, lastChoice(code));
+      ranking = rankVariants(variants, hints, hashes, pre ? undefined : lastChoice(code));
+      if (funnel) funnel.art = ranking.art;
       // Sin ambigüedad (y con pistas reales) se salta el selector: el banner
       // de 3 s sigue permitiendo cancelar.
       if (hints && !ranking.ambiguous && ranking.best) {
         chosen = ranking.best;
       } else {
-        const v = await askVariant(code, variants, ranking);
+        const v = await askVariant(label, variants, ranking, funnel);
         setPicker(null);
         if (!v) {
-          markSeen(code);
-          setStatus({ text: `Lectura de ${code} descartada` });
+          markSeen(seenKey);
+          setStatus({ text: `Lectura de ${label} descartada` });
           return false;
         }
         chosen = v;
       }
-      rememberChoice(code, chosen.variantId);
+      rememberChoice(chosen.code, chosen.variantId);
+    }
+    if (pre) {
+      code = chosen.code;
+      variants = variants.filter((v) => v.code === code);
+      markSeen(seenKey);
     }
     const detected = hintSummary(ranking);
     if (!manual) {
@@ -162,6 +194,7 @@ export default function ScanPage() {
         title: chosen.fullName || chosen.name,
         detail: `${code} · ${chosen.label} · se añadirá a la cola${detected ? ` · ${detected}` : ""}`,
         image: chosen.image,
+        funnel: funnelLabel(funnel),
       });
       setBanner(null);
       if (!ok) {
@@ -185,8 +218,8 @@ export default function ScanPage() {
   }, []);
 
   const goTo = useCallback(
-    async (code: string, getHints?: HintSource) => {
-      if (modeRef.current === "bulk") return queueCode(code, false, getHints);
+    async (code: string, getHints?: HintSource, funnel?: Funnel) => {
+      if (modeRef.current === "bulk") return queueCode(code, false, getHints, funnel);
       if (triedRef.current.has(code)) return false;
       triedRef.current.add(code);
       setStatus({ text: `Leí ${code}, buscando…` });
@@ -197,7 +230,8 @@ export default function ScanPage() {
         const data = await res.json().catch(() => null);
         const hintsP = data?.variants?.length > 1 && getHints ? getHints(data.variants) : null;
         const v = data?.variants?.length ? baseVariant(data.variants as Variant[]) : null;
-        const ok = await confirmRead({ title: v?.name ?? code, detail: `${code} · abriendo la carta`, image: v?.image });
+        if (funnel) funnel.code = { code, count: data?.variants?.length ?? 0 };
+        const ok = await confirmRead({ title: v?.name ?? code, detail: `${code} · abriendo la carta`, image: v?.image, funnel: funnelLabel(funnel) });
         setBanner(null);
         setFound(false);
         if (!ok) {
@@ -216,6 +250,79 @@ export default function ScanPage() {
       return false;
     },
     [router, queueCode],
+  );
+
+  // Solo nombre (código ilegible): candidatas = todas las versiones de todos
+  // los códigos con ese nombre; el arte y las pistas eligen entre ellas.
+  const goName = useCallback(
+    async (codes: string[], getHints: HintSource, funnel: Funnel) => {
+      const key = `nombre:${funnel.name?.match ?? codes.join(",")}`;
+      if (modeRef.current === "single" && triedRef.current.has(key)) return false;
+      if (modeRef.current === "bulk" && recentlySeen(key)) {
+        markSeen(key);
+        return false;
+      }
+      triedRef.current.add(key);
+      setStatus({ text: `Leí el nombre ${funnel.name?.match}, buscando…` });
+      const lists = await Promise.all(
+        codes.slice(0, MAX_NAME_CODES).map(async (c) => {
+          const cached = variantsCache.current.get(c);
+          if (cached) return cached;
+          const res = await fetch(`/api/card/${encodeURIComponent(c)}`).catch(() => null);
+          const data = res?.ok ? await res.json().catch(() => null) : null;
+          const vs = (data?.variants ?? []) as Variant[];
+          if (vs.length) variantsCache.current.set(c, vs);
+          return vs;
+        }),
+      );
+      const all = lists.flat();
+      setTimeout(() => triedRef.current.delete(key), 4000);
+      if (!all.length) return false;
+      if (funnel.name) funnel.name.count = all.length;
+      if (modeRef.current === "bulk") return queueCode(all[0].code, false, getHints, funnel, { key: funnel.name?.match ?? key, variants: all });
+      scanFeedback();
+      const hints = await getHints(all);
+      const hashes = hints?.hash ? await variantHashes(all) : {};
+      const ranking = rankVariants(all, hints, hashes);
+      funnel.art = ranking.art;
+      let chosen = ranking.best;
+      if (!hints || ranking.ambiguous || !chosen) {
+        chosen = await askVariant(funnel.name?.match ?? all[0].name, all, ranking, funnel);
+        setPicker(null);
+        if (!chosen) {
+          setStatus({ text: "Lectura descartada" });
+          return false;
+        }
+      }
+      const ok = await confirmRead({ title: chosen.fullName || chosen.name, detail: `${chosen.code} · abriendo la carta`, image: chosen.image, funnel: funnelLabel(funnel) });
+      setBanner(null);
+      if (!ok) {
+        setStatus({ text: "Cancelado. Sigue escaneando" });
+        return false;
+      }
+      runningRef.current = false;
+      if (hints) saveHints(chosen.code, hints);
+      rememberChoice(chosen.code, chosen.variantId);
+      router.push(`/carta/${chosen.code}`);
+      return true;
+    },
+    [router, queueCode],
+  );
+
+  // Embudo: Nombre → Código → (Arte en las pistas). Devuelve true si terminó.
+  const handleRead = useCallback(
+    async (src: CanvasImageSource, card: Rect, codes: string[], codeConf: number, name: NameStep | null, live: boolean) => {
+      const d = decide(name?.text ?? "", name?.matches ?? [], codes, codeConf);
+      const f = d.funnel;
+      if (f.conflict) console.info("[embudo]", f.conflict);
+      if (f.source === "name") {
+        if (live && !codes.length && (f.name?.score ?? 0) < LIVE_NAME_ONLY) return false;
+        return goName(d.codes, hintSource(src, card, ""), f);
+      }
+      for (const c of d.codes) if (await goTo(c, hintSource(src, card, c), { ...f, name: f.name ? { ...f.name } : undefined })) return true;
+      return false;
+    },
+    [goTo, goName],
   );
 
   // Zoom de la cámara (si el navegador lo permite) para acercar la carta del slinger.
@@ -269,18 +376,28 @@ export default function ScanPage() {
         // zona visible del video: ahí se busca la carta (aunque esté fuera del marco)
         const view = { x: -ox / s, y: -oy / s, w: box.clientWidth / s, h: box.clientHeight / s };
         try {
-          const { codes, text, preview, card: det } = await readCardCodeOnce(video, card, view, n++);
+          // Con carta detectada: nombre y código en paralelo sobre la misma copia del fotograma.
+          const seen = detectCard(video, view);
+          const shot = seen ? snapshot(video) : null;
+          const [{ codes, text, preview, card: det, conf }, name] = await Promise.all([
+            readCardCodeOnce(shot ?? video, card, view, n++),
+            shot ? nameStep(shot, seen) : Promise.resolve(null),
+          ]);
           if (text.trim()) setLastText(text.trim());
+          if (name?.text) setLastName(name.text);
           if (preview && n % 3 === 1) setPreview(preview);
-          const shot = codes.length ? snapshot(video) : null;
-          for (const c of codes) if (await goTo(c, hintSource(shot!, det ?? card, c))) return;
+          if (name?.preview && n % 3 === 1) setNamePreview(name.preview);
+          if (codes.length || name?.matches.length) {
+            const src = shot ?? snapshot(video);
+            if (await handleRead(src, det ?? seen ?? card, codes, conf ?? 0, name, true)) return;
+          }
         } catch (e) {
           setStatus({ text: "Error del lector: " + (e as Error).message, tone: "error" });
         }
       }
       await new Promise((r) => setTimeout(r, 60));
     }
-  }, [goTo]);
+  }, [handleRead]);
 
   const start = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -324,6 +441,7 @@ export default function ScanPage() {
 
   useEffect(() => {
     getWorker().catch(() => {}); // precarga el OCR
+    loadNameIndex().catch(() => {}); // y el índice de nombres
     start();
     return stop;
   }, [start, stop]);
@@ -342,11 +460,15 @@ export default function ScanPage() {
     img.src = URL.createObjectURL(file);
     await img.decode();
     try {
-      const { codes, text, preview, card } = await readCardCode(img, { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
+      const full = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
+      const det = detectCard(img, full);
+      const [{ codes, text, preview, card, conf }, name] = await Promise.all([readCardCode(img, full), nameStep(img, det)]);
       setLastText(text.trim() || "(sin texto)");
+      setLastName(name?.text ?? "");
       if (preview) setPreview(preview);
-      for (const c of codes) if (await goTo(c, hintSource(img, card, c))) return;
-      if (modeRef.current === "bulk" && codes.length) return;
+      if (name?.preview) setNamePreview(name.preview);
+      if (await handleRead(img, card ?? det ?? full, codes, conf ?? 0, name, false)) return;
+      if (modeRef.current === "bulk" && (codes.length || name?.matches.length)) return;
       setStatus({ text: "No encontré el código en la foto. Acércate más a la carta o escríbelo abajo.", tone: "error" });
     } finally {
       URL.revokeObjectURL(img.src);
@@ -416,7 +538,7 @@ export default function ScanPage() {
         </div>
       )}
       {reviewing && <BulkPanel onDone={resume} />}
-      {picker && <VariantPicker code={picker.code} variants={picker.variants} ranking={picker.ranking} onPick={picker.resolve} />}
+      {picker && <VariantPicker code={picker.code} variants={picker.variants} ranking={picker.ranking} funnel={picker.funnel} onPick={picker.resolve} />}
 
       <div className="scanner" ref={boxRef}>
         <video ref={videoRef} playsInline muted />
@@ -431,7 +553,7 @@ export default function ScanPage() {
           </button>
         )}
         <div className={"scanner-status " + (status.tone === "error" ? "error" : "")}>{status.text}</div>
-        {banner && <ReadBanner key={banner.title + banner.detail} title={banner.title} detail={banner.detail} image={banner.image} onDone={banner.resolve} />}
+        {banner && <ReadBanner key={banner.title + banner.detail} title={banner.title} detail={banner.detail} image={banner.image} funnel={banner.funnel} onDone={banner.resolve} />}
       </div>
       <div className="row" style={{ marginTop: 8 }}>
         <button
@@ -479,7 +601,7 @@ export default function ScanPage() {
         <button className="btn primary" type="submit">{mode === "bulk" ? "Añadir" : "Ir"}</button>
       </form>
 
-      {lastText && (
+      {(lastText || lastName) && (
         <>
           <div className="spacer" />
           <details>
@@ -487,6 +609,9 @@ export default function ScanPage() {
             <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "var(--muted)" }}>{lastText}</pre>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             {preview && <img src={preview} alt="Zona que analiza el lector" id="ocr-preview" style={{ width: "100%", borderRadius: 8, background: "#fff" }} />}
+            {lastName && <p style={{ fontSize: 12, color: "var(--muted)" }} data-testid="ocr-name">Nombre leído: {lastName}</p>}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            {namePreview && <img src={namePreview} alt="Zona del nombre" id="ocr-name-preview" style={{ width: "100%", borderRadius: 8, background: "#fff" }} />}
           </details>
         </>
       )}

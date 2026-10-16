@@ -76,7 +76,7 @@ function prepare(src: CanvasImageSource, r: Rect, invert: boolean, cardH: number
   return c;
 }
 
-export type ScanResult = { codes: string[]; text: string; preview?: string; card?: Rect | null };
+export type ScanResult = { codes: string[]; text: string; preview?: string; card?: Rect | null; conf?: number };
 
 // Zonas relativas a la carta, de la más precisa a la más amplia. Las amplias
 // cubren cartas más chicas o corridas respecto al marco.
@@ -106,7 +106,7 @@ async function attempt(src: CanvasImageSource, card: Rect, zone: number, invert:
     currentPsm = psm;
   }
   const { data } = await worker.recognize(canvas);
-  return { codes: extractCodes(data.text), text: data.text, preview: canvas.toDataURL("image/png") };
+  return { codes: extractCodes(data.text), text: data.text, preview: canvas.toDataURL("image/png"), conf: (data.confidence ?? 0) / 100 };
 }
 
 // Detecta el rectángulo de la carta dentro de `area` (coordenadas de `src`).
@@ -210,7 +210,7 @@ export async function readCardCode(src: CanvasImageSource, card: Rect): Promise<
     const r = await attempt(src, c, zone, invert);
     text += r.text + "\n";
     preview ??= r.preview;
-    if (r.codes.length) return { codes: r.codes, text, preview: r.preview, card: c };
+    if (r.codes.length) return { codes: r.codes, text, preview: r.preview, card: c, conf: r.conf };
   }
   return { codes: [], text, preview };
 }
@@ -270,4 +270,75 @@ export function snapshot(src: HTMLVideoElement): HTMLCanvasElement {
   c.height = src.videoHeight;
   c.getContext("2d")!.drawImage(src, 0, 0);
   return c;
+}
+
+// ---------- Nombre de la carta ----------
+// Segundo worker de Tesseract (alfabeto latino, una línea) para leer el nombre
+// en paralelo con el código sobre el mismo fotograma.
+let nameWorkerP: Promise<Worker> | null = null;
+function getNameWorker(): Promise<Worker> {
+  if (!nameWorkerP) {
+    nameWorkerP = (async () => {
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng", 1, {
+        workerPath: "/tesseract/worker.min.js",
+        corePath: "/tesseract/core",
+        langPath: "/tesseract/lang",
+        gzip: true,
+      });
+      await worker.setParameters({
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÁÉÍÓÚÜÑáéíóúüñ.-' &",
+        tessedit_pageseg_mode: "7" as never, // una sola línea
+        preserve_interword_spaces: "1",
+      });
+      return worker;
+    })().catch((e) => {
+      nameWorkerP = null;
+      throw e;
+    });
+  }
+  return nameWorkerP;
+}
+
+// Caja del nombre en cartas de One Piece: franja inferior, centrada, sobre la
+// línea de tipo (~82–90% del alto, 15–85% del ancho). La segunda es más amplia
+// por si la carta detectada quedó algo corrida.
+export const NAME_ZONES = [
+  { x: 0.15, y: 0.82, w: 0.7, h: 0.08 },
+  { x: 0.08, y: 0.78, w: 0.84, h: 0.14 },
+];
+
+export type NameRead = { text: string; conf: number; preview?: string };
+
+// Gris con contraste, ampliado para que la letra quede de ~50 px.
+function grayCrop(src: CanvasImageSource, r: Rect, cardH: number): HTMLCanvasElement {
+  const k = Math.min(4, Math.max(1, 1400 / cardH));
+  const c = document.createElement("canvas");
+  c.width = Math.round(r.w * k);
+  c.height = Math.round(r.h * k);
+  const ctx = c.getContext("2d")!;
+  ctx.imageSmoothingQuality = "high";
+  ctx.filter = "grayscale(1) contrast(1.5)";
+  ctx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  return c;
+}
+
+/**
+ * Lee el nombre sobre la carta detectada. `accept` dice si el texto encaja con
+ * el índice; si no, se prueba la franja amplia binarizada.
+ */
+export async function readCardName(src: CanvasImageSource, card: Rect, accept: (t: string) => boolean = () => true): Promise<NameRead> {
+  const worker = await getNameWorker();
+  const c = clamp(card, src);
+  let first: NameRead | null = null;
+  for (let i = 0; i < NAME_ZONES.length; i++) {
+    const z = NAME_ZONES[i];
+    const r = clamp({ x: c.x + c.w * z.x, y: c.y + c.h * z.y, w: c.w * z.w, h: c.h * z.h }, src);
+    const canvas = i === 0 ? grayCrop(src, r, c.h) : prepare(src, r, false, c.h * 1.4);
+    const { data } = await worker.recognize(canvas);
+    const res = { text: data.text.replace(/\s+/g, " ").trim(), conf: (data.confidence ?? 0) / 100, preview: canvas.toDataURL("image/png") };
+    first ??= res;
+    if (res.text && accept(res.text)) return res;
+  }
+  return first!;
 }
