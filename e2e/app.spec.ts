@@ -39,6 +39,8 @@ test("bulk: encola, deduplica, revisa y agrega a la colección", async ({ page }
   for (const c of ["OP01-001", "OP01-002", "OP01-001"]) {
     await input.fill(c);
     await page.getByRole("button", { name: "Añadir" }).click();
+    // OP01-001 tiene 2 versiones: se pregunta cuál antes de encolar
+    if (c === "OP01-001") await page.getByRole("dialog", { name: "Elige la versión de OP01-001" }).getByRole("button", { name: "Elegir Normal" }).click();
     await expect(input).toHaveValue("");
   }
   await expect(page.getByTestId("queue-count")).toHaveText("En cola: 3 / 30");
@@ -86,4 +88,82 @@ test("1 a 1: detalle desde la página de la carta", async ({ page }) => {
   await page.goto("/carta/OP01-001");
   await page.getByRole("button", { name: "Ver detalle", exact: true }).nth(1).click();
   await expect(page.getByRole("dialog").getByText("Roronoa Zoro (Alternate Art)")).toBeVisible();
+});
+
+// Foto sintética "desde el slinger": carta chica y centrada sobre fondo claro,
+// con el código diminuto abajo a la derecha de la carta (no del encuadre).
+async function cardPhoto(page: Page, code: string): Promise<Buffer> {
+  const p = await page.context().newPage();
+  await p.setViewportSize({ width: 1000, height: 1300 });
+  await p.setContent(`<body style="margin:0;background:#e8e8e4">
+    <div id="c" style="position:absolute;left:250px;top:300px;width:500px;height:698px;border-radius:14px;
+      background:linear-gradient(135deg,#c9b21a,#6b2d8f 60%,#2a1440);border:6px solid #222;box-sizing:border-box">
+      <div style="position:absolute;left:30px;top:30px;width:60px;height:60px;border-radius:50%;background:#fff;font:bold 40px Arial;text-align:center">6</div>
+      <div style="position:absolute;left:30px;right:30px;top:420px;height:120px;background:#f4f1d0;font:16px Arial;padding:8px">Activate Main Once Per Turn You may reveal 3 cards from your hand</div>
+      <div style="position:absolute;left:60px;right:60px;top:580px;height:40px;background:#f4f1d0;font:bold 28px Georgia;text-align:center">Gorgon Sisters</div>
+      <div style="position:absolute;right:18px;bottom:12px;padding:2px 6px;background:#fff;font:bold 22px Arial;letter-spacing:1px">${code}</div>
+    </div></body>`);
+  const buf = await p.screenshot();
+  await p.close();
+  return buf;
+}
+const upload = async (page: Page, code: string) =>
+  page.locator('input[type="file"]').setInputFiles({ name: "carta.png", mimeType: "image/png", buffer: await cardPhoto(page, code) });
+
+test("bulk: foto lejana, elige versión y el banner acepta al terminar la cuenta", async ({ page }) => {
+  await page.goto("/escanear");
+  await page.getByRole("tab", { name: "Bulk" }).click();
+  await upload(page, "OP01-001");
+  const picker = page.getByRole("dialog", { name: "Elige la versión de OP01-001" });
+  await expect(picker.getByTestId("variant-option")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.getByTestId("queue-count")).toHaveText("En cola: 0 / 30");
+  await picker.getByRole("button", { name: "Elegir Parallel 1" }).click();
+  const banner = page.getByTestId("read-banner");
+  await expect(banner).toContainText("Roronoa Zoro (Alternate Art)");
+  await expect(banner.getByRole("button", { name: "Cancelar" })).toBeVisible();
+  await expect(page.getByTestId("queue-count")).toHaveText("En cola: 0 / 30");
+  await expect(banner).toHaveCount(0, { timeout: 5000 });
+  await expect(page.getByTestId("queue-count")).toHaveText("En cola: 1 / 30");
+  const q = await page.evaluate(() => JSON.parse(localStorage.getItem("opmc.bulkQueue.v1") || "[]"));
+  expect(q[0]).toMatchObject({ code: "OP01-001", variantId: "OP01-001_p1", qty: 1 });
+});
+
+test("bulk: una sola versión va directo al banner y Cancelar la descarta", async ({ page }) => {
+  await page.goto("/escanear");
+  await page.getByRole("tab", { name: "Bulk" }).click();
+  await upload(page, "OP01-002");
+  const banner = page.getByTestId("read-banner");
+  await expect(banner).toContainText("Trafalgar Law", { timeout: 30_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await banner.getByRole("button", { name: "Cancelar" }).click();
+  await expect(banner).toHaveCount(0);
+  await page.waitForTimeout(3500);
+  await expect(page.getByTestId("queue-count")).toHaveText("En cola: 0 / 30");
+});
+
+test("1 a 1: banner con Cancelar se queda; sin tocar abre la carta", async ({ page }) => {
+  await page.goto("/escanear");
+  await upload(page, "OP01-002");
+  const banner = page.getByTestId("read-banner");
+  await expect(banner).toContainText("Trafalgar Law", { timeout: 30_000 });
+  await banner.getByRole("button", { name: "Cancelar" }).click();
+  await page.waitForTimeout(3500);
+  await expect(page).toHaveURL(/\/escanear$/);
+
+  await upload(page, "OP01-001");
+  await expect(banner).toContainText("Roronoa Zoro", { timeout: 30_000 });
+  await expect(page).toHaveURL(/\/escanear$/);
+  await page.waitForURL(/\/carta\/OP01-001$/, { timeout: 6000 });
+});
+
+test("modo slinger: achica el marco y se recuerda", async ({ page }) => {
+  await page.goto("/escanear");
+  const frame = page.locator(".frame");
+  await expect(frame).toBeVisible();
+  const before = (await frame.boundingBox())!.height;
+  await page.getByRole("button", { name: /Modo slinger/ }).click();
+  await expect(page.getByRole("button", { name: /Modo slinger/ })).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => (await frame.boundingBox())!.height).toBeLessThan(before * 0.8);
+  await page.reload();
+  await expect(page.getByRole("button", { name: /Modo slinger/ })).toHaveAttribute("aria-pressed", "true");
 });

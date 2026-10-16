@@ -55,11 +55,11 @@ export function BulkPanel({ onDone }: { onDone: () => void }) {
           {queue.map((i) => {
             const v = i.variants.find((x) => x.variantId === i.variantId) ?? i.variants[0];
             return (
-              <div className="item check-item" key={i.code} data-testid="queue-item">
+              <div className="item check-item" key={`${i.code}|${i.variantId}`} data-testid="queue-item">
                 <input
                   type="checkbox"
                   checked={i.checked}
-                  onChange={(e) => updateItem(i.code, { checked: e.target.checked })}
+                  onChange={(e) => updateItem(i, { checked: e.target.checked })}
                   aria-label={`Incluir ${v?.name ?? i.code}`}
                 />
                 <Thumb src={v?.image ?? ""} alt={v?.name ?? i.code} width={48} onClick={() => setDetail({ code: i.code, variantId: i.variantId })} />
@@ -72,7 +72,7 @@ export function BulkPanel({ onDone }: { onDone: () => void }) {
                       style={{ minHeight: 32, padding: "2px 6px", fontSize: "0.8rem" }}
                       value={i.variantId}
                       aria-label={`Versión de ${i.code}`}
-                      onChange={(e) => updateItem(i.code, { variantId: e.target.value })}
+                      onChange={(e) => updateItem(i, { variantId: e.target.value })}
                     >
                       {i.variants.map((x) => (
                         <option key={x.variantId} value={x.variantId}>{x.label}</option>
@@ -81,9 +81,9 @@ export function BulkPanel({ onDone }: { onDone: () => void }) {
                   )}
                 </div>
                 <div className="stepper">
-                  <button onClick={() => updateItem(i.code, { qty: Math.max(1, i.qty - 1) })} aria-label="Menos">−</button>
+                  <button onClick={() => updateItem(i, { qty: Math.max(1, i.qty - 1) })} aria-label="Menos">−</button>
                   <output>{i.qty}</output>
-                  <button onClick={() => updateItem(i.code, { qty: i.qty + 1 })} aria-label="Más">+</button>
+                  <button onClick={() => updateItem(i, { qty: i.qty + 1 })} aria-label="Más">+</button>
                 </div>
               </div>
             );

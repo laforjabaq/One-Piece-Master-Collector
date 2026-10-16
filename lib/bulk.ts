@@ -61,22 +61,36 @@ export const baseVariant = (vs: Variant[]) => vs.find((v) => !v.variantId.includ
 export const DEDUPE_MS = 4000;
 const lastSeen = new Map<string, number>();
 
-/** Devuelve true si se añadió (o sumó) a la cola; false si fue una lectura repetida. */
-export function enqueue(code: string, variants: Variant[], opts: { force?: boolean; now?: number } = {}): boolean {
-  const now = opts.now ?? Date.now();
+/** true si el código se leyó hace menos de DEDUPE_MS (sigue frente a la cámara). */
+export function recentlySeen(code: string, now = Date.now()): boolean {
   const prev = lastSeen.get(code);
+  return prev !== undefined && now - prev < DEDUPE_MS;
+}
+export function markSeen(code: string, now = Date.now()) {
   lastSeen.set(code, now);
-  if (!opts.force && prev !== undefined && now - prev < DEDUPE_MS) return false;
+}
+
+/** Devuelve true si se añadió (o sumó) a la cola; false si fue una lectura repetida. */
+export function enqueue(
+  code: string,
+  variants: Variant[],
+  opts: { force?: boolean; now?: number; variantId?: string } = {},
+): boolean {
+  const now = opts.now ?? Date.now();
+  const seen = recentlySeen(code, now);
+  lastSeen.set(code, now);
+  if (!opts.force && seen) return false;
+  const variantId = opts.variantId ?? baseVariant(variants)?.variantId ?? code;
   const q = [...read()];
-  const i = q.findIndex((x) => x.code === code);
+  const i = q.findIndex((x) => x.code === code && x.variantId === variantId);
   if (i >= 0) q[i] = { ...q[i], qty: q[i].qty + 1, at: now };
-  else q.push({ code, qty: 1, variants, variantId: baseVariant(variants)?.variantId ?? code, checked: true, at: now });
+  else q.push({ code, qty: 1, variants, variantId, checked: true, at: now });
   write(q);
   return true;
 }
 
-export function updateItem(code: string, patch: Partial<QueueItem>) {
-  write(read().map((x) => (x.code === code ? { ...x, ...patch } : x)));
+export function updateItem(item: Pick<QueueItem, "code" | "variantId">, patch: Partial<QueueItem>) {
+  write(read().map((x) => (x.code === item.code && x.variantId === item.variantId ? { ...x, ...patch } : x)));
 }
 
 export function clearQueue() {
