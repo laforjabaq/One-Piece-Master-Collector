@@ -98,6 +98,7 @@ export default function CardPage() {
               <img src={v.image} alt={`${v.name} ${v.label}`} loading="lazy" />
               {owned > 0 && <span className="variant-owned">×{owned}</span>}
               <div className="variant-label">{v.label}</div>
+              {v.setName && v.setName !== first.setName && <div className="item-meta">{v.setName}</div>}
               <div className="item-meta">{v.price != null ? `${usd(v.price)} TCGplayer` : "Sin precio"}</div>
             </button>
           );

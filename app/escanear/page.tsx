@@ -171,7 +171,7 @@ export default function ScanPage() {
   return (
     <>
       <h1>Escanear</h1>
-      <p className="sub">Coloca la carta dentro del marco. Se detecta sola.</p>
+      <p className="sub">Coloca la carta dentro del marco. Se detecta sola. En PC puedes usar la webcam o subir una foto.</p>
 
       <div className="scanner" ref={boxRef}>
         <video ref={videoRef} playsInline muted />
@@ -194,7 +194,7 @@ export default function ScanPage() {
           <button className="btn primary" onClick={start}>Abrir cámara</button>
         )}
         <label className="btn" style={{ flex: 1 }}>
-          Tomar foto
+          Tomar o subir foto
           <input type="file" accept="image/*" capture="environment" hidden onChange={(e) => onPhoto(e.target.files?.[0])} />
         </label>
       </div>

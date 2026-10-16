@@ -46,11 +46,24 @@ const num = (r: Raw, ...keys: string[]) => {
   return null;
 };
 
-function variantLabel(variantId: string, name: string): string {
+// optcgapi pone la versión entre paréntesis en el nombre, p. ej.
+// "Monkey.D.Luffy (119) (SP) (Gold)" o "Monkey.D.Luffy (OP05-119) (Reprint)".
+function splitName(raw: string, code: string): { name: string; tags: string[] } {
+  const tags: string[] = [];
+  let name = raw.trim();
+  for (let m = name.match(/\s*\(([^()]*)\)\s*$/); m; m = name.match(/\s*\(([^()]*)\)\s*$/)) {
+    const tag = m[1].trim();
+    // "(119)" o "(OP05-119)" solo repiten el número de la carta
+    if (tag && !/^\d+$/.test(tag) && tag.toUpperCase() !== code) tags.unshift(tag);
+    name = name.slice(0, m.index).trim();
+  }
+  return { name: name || raw.trim(), tags };
+}
+
+function variantLabel(variantId: string, tags: string[]): string {
+  if (tags.length) return tags.join(" · ");
   const m = variantId.match(/_(p|r)(\d+)$/i);
-  if (m) return `${m[1].toLowerCase() === "p" ? "Parallel" : "Reprint"} ${m[2]}`;
-  const paren = name.match(/\(([^)]+)\)\s*$/);
-  if (paren && /parallel|manga|alt|sp|special|promo|foil|reprint/i.test(paren[1])) return paren[1];
+  if (m) return m[1].toLowerCase() === "p" ? `Parallel ${m[2]}` : `Reprint ${m[2]}`;
   return "Normal";
 }
 
@@ -58,12 +71,12 @@ export function normalize(r: Raw): Variant | null {
   const code = str(r, "card_set_id", "card_id", "id").toUpperCase();
   if (!code) return null;
   const variantId = str(r, "card_image_id") || code;
-  const name = str(r, "card_name", "name");
+  const { name, tags } = splitName(str(r, "card_name", "name"), code);
   return {
     variantId,
     code,
-    name: name.replace(/\s*\((?:parallel|alternate art|manga)[^)]*\)\s*$/i, "") || code,
-    label: variantLabel(variantId, name),
+    name: name || code,
+    label: variantLabel(variantId, tags),
     image: str(r, "card_image", "image", "image_url"),
     rarity: str(r, "rarity"),
     setName: str(r, "set_name"),
@@ -137,7 +150,10 @@ export async function getAllCards(): Promise<CardSummary[]> {
     const g = groups.get(v.code);
     if (g) {
       g.variants++;
-      if (v.label === "Normal" && v.image) g.image = v.image;
+      if (!v.variantId.includes("_") && v.image) {
+        g.image = v.image;
+        g.setName = v.setName;
+      }
     } else {
       groups.set(v.code, {
         code: v.code,

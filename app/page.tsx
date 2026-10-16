@@ -113,7 +113,7 @@ export default function CollectionPage() {
       <div className="spacer" />
       <div className="spacer" />
       <p className="sub" style={{ fontSize: "0.8rem" }}>
-        La colección se guarda en este teléfono. Haz un respaldo de vez en cuando.
+        La colección se guarda en este dispositivo (teléfono o PC por separado). Haz un respaldo de vez en cuando.
       </p>
       <div className="row">
         <button className="btn small" onClick={doExport} disabled={!entries.length}>Exportar respaldo</button>
