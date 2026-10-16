@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getWorker, readCardCode } from "@/lib/ocr";
+import { getWorker, readCardCode, readCardCodeOnce } from "@/lib/ocr";
 import { normalizeCode } from "@/lib/code";
 
 type Status = { text: string; tone?: "error" | "ok" };
@@ -21,6 +21,7 @@ export default function ScanPage() {
   const [found, setFound] = useState(false);
   const [manual, setManual] = useState("");
   const [lastText, setLastText] = useState("");
+  const [preview, setPreview] = useState("");
   const frameRef = useRef(frame);
   frameRef.current = frame;
 
@@ -69,6 +70,7 @@ export default function ScanPage() {
 
   const loop = useCallback(async () => {
     const video = videoRef.current, box = boxRef.current;
+    let n = 0;
     while (runningRef.current && video && box) {
       if (video.readyState >= 2 && video.videoWidth) {
         // Pasar el marco de pantalla a coordenadas del video (object-fit: cover).
@@ -78,14 +80,15 @@ export default function ScanPage() {
         const f = frameRef.current;
         const card = { x: (f.x - ox) / s, y: (f.y - oy) / s, w: f.w / s, h: f.h / s };
         try {
-          const { codes, text } = await readCardCode(video, card);
-          setLastText(text.trim());
+          const { codes, text, preview } = await readCardCodeOnce(video, card, n++);
+          if (text.trim()) setLastText(text.trim());
+          if (preview && n % 3 === 1) setPreview(preview);
           for (const c of codes) if (await goTo(c)) return;
         } catch (e) {
           setStatus({ text: "Error del lector: " + (e as Error).message, tone: "error" });
         }
       }
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 60));
     }
   }, [goTo]);
 
@@ -96,7 +99,7 @@ export default function ScanPage() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -113,7 +116,7 @@ export default function ScanPage() {
       }
       setStatus({ text: "Cargando lector…" });
       await getWorker();
-      setStatus({ text: "Apunta al código de abajo a la derecha (ej. OP05-119)" });
+      setStatus({ text: "Llena el marco con la carta y mantenla quieta" });
       runningRef.current = true;
       loop();
     } catch (e) {
@@ -219,6 +222,8 @@ export default function ScanPage() {
           <details>
             <summary>Lo último que leyó el OCR</summary>
             <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "var(--muted)" }}>{lastText}</pre>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            {preview && <img src={preview} alt="Zona que analiza el lector" id="ocr-preview" style={{ width: "100%", borderRadius: 8, background: "#fff" }} />}
           </details>
         </>
       )}

@@ -6,12 +6,14 @@ const toDigits = (s: string) => s.replace(/[ODQILTSBZGA]/g, (c) => DIGIT[c]);
 
 const D = "[0-9ODQILTSBZGA]";
 const SEP = "\\s*[-–—~_.=]?\\s*";
-const SET_RE = new RegExp(`(PR[B8]|[O0]P|[S5][T7]|E[B8])\\s*(${D}${D})${SEP}(${D}${D}${D})(?!${D})`, "g");
-const PROMO_RE = new RegExp(`(?:^|[^A-Z0-9])P\\s*[-–—~_.=]\\s*(${D}${D}${D})(?!${D})`, "g");
+// Tras el número suele venir pegada la rareza ("OP05-119SEC"), así que solo
+// se descarta si sigue otro dígito real.
+const SET_RE = new RegExp(`(PR[B8]|[O0D][PR]|[S5][T7]|E[B8])\\s*(${D}${D})${SEP}(${D}${D}${D})(?![0-9])`, "g");
+const PROMO_RE = new RegExp(`(?:^|[^A-Z0-9])P\\s*[-–—~_.=]\\s*(${D}${D}${D})(?![0-9])`, "g");
 
 function prefix(p: string): string {
   if (p.startsWith("PR")) return "PRB";
-  if (/^[O0]P$/.test(p)) return "OP";
+  if (/^[O0D][PR]$/.test(p)) return "OP";
   if (/^[S5][T7]$/.test(p)) return "ST";
   return "EB";
 }
