@@ -6,7 +6,8 @@
     "postinstall": "node scripts/copy-tesseract.mjs",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
@@ -16,6 +17,7 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "typescript": "^5.9.3"
