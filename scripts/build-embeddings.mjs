@@ -57,27 +57,38 @@ function setOf(r) {
 const normSet = (s) => s.trim().toUpperCase().replace(/[\s-]+/g, "");
 
 async function getJson(url) {
+  let last = "";
   for (let i = 0; i < 3; i++) {
     try {
       const res = await fetch(url, { headers: { Accept: "application/json", ...UA } });
+      last = `HTTP ${res.status}`;
       if (res.ok) {
         const d = await res.json();
         return Array.isArray(d) ? d : d?.results ?? d?.data ?? [];
       }
-    } catch {
-      /* reintento */
+    } catch (e) {
+      last = String(e?.cause?.code || e?.message || e);
     }
     await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
   }
-  throw new Error(`No se pudo leer ${url}`);
+  throw new Error(`No se pudo leer ${url} (${last})`);
 }
 
 async function catalog() {
   const lists = process.env.CATALOG_FILE
     ? [JSON.parse(await readFile(process.env.CATALOG_FILE, "utf8"))]
-    : await Promise.all(["allSetCards", "allSTCards", "allPromoCards"].map((p) => getJson(`${BASE}/${p}/`)));
+    : await Promise.all(
+        ["allSetCards", "allSTCards", "allPromoCards"].map((p) =>
+          getJson(`${BASE}/${p}/`).catch((e) => {
+            // Una lista caída (p. ej. promos) no debe tumbar todo el índice.
+            console.warn(`AVISO: ${e.message}`);
+            return null;
+          }),
+        ),
+      );
+  if (lists.every((l) => l === null)) throw new Error("optcgapi no respondió en ninguna lista");
   const seen = new Map();
-  for (const r of lists.flat()) {
+  for (const r of lists.filter(Boolean).flat()) {
     const code = str(r, "card_set_id", "card_id", "id").toUpperCase();
     const image = str(r, "card_image", "image", "image_url");
     if (!code || !image) continue;

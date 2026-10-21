@@ -24,16 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
       - name: Cache model
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/dinov2s-quantized.onnx
           key: dinov2s-quantized-v1
@@ -62,5 +60,6 @@ jobs:
             echo "Sin cambios"
           else
             git commit -m "Update art embeddings index"
-            git push origin HEAD:main
+            # Empuja a la rama en ejecución (nunca a main desde otra rama).
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
