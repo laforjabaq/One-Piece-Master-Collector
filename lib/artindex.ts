@@ -21,6 +21,8 @@ export type IndexMeta = {
 export type ArtIndex = {
   meta: IndexMeta;
   data: Int8Array;
+  /** filas ya multiplicadas por su escala (se calcula una vez al cargar) */
+  vec: Float32Array;
   rowOf: Map<string, number>;
 };
 
@@ -40,7 +42,13 @@ async function load(): Promise<ArtIndex | null> {
     const data = new Int8Array(await bin.arrayBuffer());
     if (data.length < meta.count * meta.dims || meta.scales.length !== meta.count || meta.items.length !== meta.count) return null;
     const rowOf = new Map(meta.items.map((it, i) => [it[0], i]));
-    return (current = { meta, data, rowOf });
+    const D = meta.dims, vec = new Float32Array(meta.count * D);
+    for (let r = 0; r < meta.count; r++) {
+      const s = meta.scales[r], o = r * D;
+      for (let j = 0; j < D; j++) vec[o + j] = data[o + j] * s;
+    }
+    document.documentElement.dataset.artIndex = String(meta.count);
+    return (current = { meta, data, vec, rowOf });
   } catch {
     return null;
   }
@@ -58,17 +66,16 @@ export const compatible = (ix: ArtIndex, embedderVersion: string, dims: number) 
   embedderVersion.startsWith(ix.meta.model) && dims === ix.meta.dims;
 
 export function dot(ix: ArtIndex, row: number, q: ArrayLike<number>): number {
-  const D = ix.meta.dims, o = row * D;
+  const D = ix.meta.dims, o = row * D, v = ix.vec;
   let s = 0;
-  for (let j = 0; j < D; j++) s += ix.data[o + j] * q[j];
-  return s * ix.meta.scales[row];
+  for (let j = 0; j < D; j++) s += v[o + j] * q[j];
+  return s;
 }
 
 /** Vector (float) de una fila. */
 export function rowVector(ix: ArtIndex, row: number): Float32Array {
-  const D = ix.meta.dims, v = new Float32Array(D), s = ix.meta.scales[row];
-  for (let j = 0; j < D; j++) v[j] = ix.data[row * D + j] * s;
-  return v;
+  const D = ix.meta.dims;
+  return ix.vec.slice(row * D, row * D + D);
 }
 
 /** Similitud de la consulta con cada variantId pedido (solo los que están en el índice). */
@@ -85,8 +92,9 @@ export function scoreIds(ix: ArtIndex, q: ArrayLike<number>, ids: string[]): Rec
 export function nearest(ix: ArtIndex, q: ArrayLike<number>, k = 8, sets: string[] = []): Hit[] {
   const best: Hit[] = [];
   const items = ix.meta.items;
+  const only = sets.length ? new Set(sets) : null;
   for (let r = 0; r < items.length; r++) {
-    if (sets.length && !sets.includes(items[r][2])) continue;
+    if (only && !only.has(items[r][2])) continue;
     const score = dot(ix, r, q);
     if (best.length < k || score > best[best.length - 1].score) {
       const hit = { variantId: items[r][0], code: items[r][1], set: items[r][2], score };

@@ -12,7 +12,7 @@ import { usd } from "@/lib/collection";
 import { lockToSets, readSession } from "@/lib/session";
 import { SessionBar } from "./session-bar";
 import { loadArtIndex, artIndexNow } from "@/lib/artindex";
-import { frameStats, rectify, thumbDiff } from "@/lib/warp";
+import { frameStats, rectifyAsync, thumbDiff } from "@/lib/warp";
 import { ReadBanner, VariantPicker } from "./confirm";
 import type { Variant } from "@/lib/optcg";
 import { hintSummary, lastChoice, rankVariants, rememberChoice, saveHints, type Ranking, type ScanHints } from "@/lib/variants";
@@ -67,6 +67,12 @@ type Banner = { title: string; detail: string; image?: string; funnel?: string; 
 
 type Status = { text: string; tone?: "error" | "ok" };
 const CARD_RATIO = 63 / 88;
+
+const openStream = () =>
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+    audio: false,
+  });
 
 export default function ScanPage() {
   const router = useRouter();
@@ -389,19 +395,25 @@ export default function ScanPage() {
     applyZoom(next);
   };
 
+  // Un solo bucle de escaneo a la vez: cada arranque invalida al anterior.
+  const loopRef = useRef(0);
   const stop = useCallback(() => {
     runningRef.current = false;
+    loopRef.current++;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setCamera(false);
   }, []);
 
   const loop = useCallback(async () => {
+    const id = ++loopRef.current;
     const video = videoRef.current, box = boxRef.current;
     let n = 0;
     let prevThumb: Float32Array | null = null, stableFrames = 0, lastArt = 0, glareShown = 0;
-    while (runningRef.current && video && box) {
+    while (runningRef.current && loopRef.current === id && video && box) {
+      const t0 = performance.now();
       if (video.readyState >= 2 && video.videoWidth) {
+        document.documentElement.dataset.scanFrames = String(n + 1);
         // Pasar el marco de pantalla a coordenadas del video (object-fit: cover).
         const s = Math.max(box.clientWidth / video.videoWidth, box.clientHeight / video.videoHeight);
         const ox = (box.clientWidth - video.videoWidth * s) / 2;
@@ -424,7 +436,9 @@ export default function ScanPage() {
           }
           // Perspectiva: si la carta está inclinada, se endereza antes de leer.
           let seenRect = seen, view2 = view, guide = card;
-          const warped = seen && shot ? rectify(shot, seen) : null;
+          // (en un Worker: en el hilo principal congelaba la cámara)
+          const warped = seen && shot ? await rectifyAsync(shot, seen) : null;
+          if (loopRef.current !== id) return;
           if (warped) {
             shot = warped.src;
             seenRect = view2 = guide = warped.card;
@@ -441,13 +455,17 @@ export default function ScanPage() {
           if (codes.length || name?.matches.length || artTurn) {
             if (artTurn) lastArt = Date.now();
             const src = shot ?? snapshot(video);
+            if (loopRef.current !== id) return;
             if (await handleRead(src, det ?? seenRect ?? card, codes, conf ?? 0, name, true, !!(det ?? seenRect))) return;
           }
         } catch (e) {
           setStatus({ text: "Error del lector: " + (e as Error).message, tone: "error" });
         }
       }
-      await new Promise((r) => setTimeout(r, 60));
+      // Respiro para el video y la interfaz: al menos 60 ms, y más si el
+      // fotograma costó mucho (teléfonos lentos), hasta 250 ms.
+      const spent = performance.now() - t0;
+      await new Promise((r) => setTimeout(r, Math.min(250, Math.max(60, spent * 0.25))));
     }
   }, [handleRead]);
 
@@ -457,10 +475,7 @@ export default function ScanPage() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-        audio: false,
-      });
+      const stream = await openStream();
       streamRef.current = stream;
       const video = videoRef.current!;
       video.srcObject = stream;
@@ -476,6 +491,7 @@ export default function ScanPage() {
       }
       setStatus({ text: "Cargando lector…" });
       await getWorker();
+      if (!streamRef.current) return; // se cerró mientras cargaba
       setStatus({ text: "Llena el marco con la carta y mantenla quieta" });
       runningRef.current = true;
       loop();
@@ -490,6 +506,61 @@ export default function ScanPage() {
       });
     }
   }, [layout, loop, applyZoom]);
+
+  // Vigilante: si el video deja de avanzar (pista congelada tras applyConstraints,
+  // pestaña en segundo plano, decodificador atascado), primero se reanuda y, si
+  // sigue quieto, se reabre la cámara sin perder el modo ni la cola.
+  useEffect(() => {
+    let last = -1, stuck = 0;
+    const kick = () => {
+      const v = videoRef.current;
+      if (v && streamRef.current && v.paused && document.visibilityState === "visible") v.play().catch(() => {});
+    };
+    const v = videoRef.current;
+    v?.addEventListener("pause", kick);
+    v?.addEventListener("stalled", kick);
+    document.addEventListener("visibilitychange", kick);
+    const timer = setInterval(async () => {
+      const video = videoRef.current, stream = streamRef.current;
+      if (!video || !stream || document.visibilityState !== "visible") {
+        last = -1;
+        stuck = 0;
+        return;
+      }
+      const track = stream.getVideoTracks()[0];
+      const ended = !track || track.readyState === "ended";
+      if (!ended && video.currentTime !== last) {
+        last = video.currentTime;
+        stuck = 0;
+        return;
+      }
+      stuck++;
+      if (!ended && stuck < 2) {
+        kick();
+        return;
+      }
+      stuck = 0;
+      last = -1;
+      document.documentElement.dataset.cameraRestarts = String(Number(document.documentElement.dataset.cameraRestarts || 0) + 1);
+      try {
+        const fresh = await openStream();
+        if (streamRef.current !== stream) return fresh.getTracks().forEach((t) => t.stop());
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = fresh;
+        video.srcObject = fresh;
+        await video.play().catch(() => {});
+        applyZoom(slingerRef.current);
+      } catch {
+        /* se reintenta en la próxima vuelta */
+      }
+    }, 2000);
+    return () => {
+      clearInterval(timer);
+      v?.removeEventListener("pause", kick);
+      v?.removeEventListener("stalled", kick);
+      document.removeEventListener("visibilitychange", kick);
+    };
+  }, [applyZoom]);
 
   useEffect(() => {
     getWorker().catch(() => {}); // precarga el OCR
@@ -517,7 +588,7 @@ export default function ScanPage() {
       let full = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
       let det = detectCard(img, full);
       // Perspectiva: carta inclinada → se endereza antes de leer y comparar.
-      const warped = det ? rectify(img, det) : null;
+      const warped = det ? await rectifyAsync(img, det) : null;
       if (warped) {
         src = warped.src;
         full = det = warped.card;
