@@ -407,10 +407,15 @@ async function indexFor(e: Embedder, dims: number): Promise<ArtIndex | null> {
  * Arte como señal principal: vecinos más cercanos en todo el catálogo
  * (restringido a los sets bloqueados). null si no hay índice o modelo.
  */
+// Una sola consulta al modelo a la vez: en un teléfono un embedding tarda
+// segundos y, sin este freno, cada intento en vivo encolaba otro más.
+let nearestBusy: Promise<unknown> | null = null;
+export const artNearestBusy = () => !!nearestBusy;
+
 export async function artNearest(src: CanvasImageSource, card: Rect, k = 8, sets: string[] = [], timeoutMs = 4000): Promise<Hit[] | null> {
-  if (!artEnabled()) return null;
+  if (!artEnabled() || nearestBusy) return null;
   const ix = await Promise.race([loadArtIndex(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]);
-  if (!ix) return null;
+  if (!ix || nearestBusy) return null;
   const work = (async () => {
     const e = await getEmbedder();
     if (!e) return null;
@@ -419,5 +424,9 @@ export async function artNearest(src: CanvasImageSource, card: Rect, k = 8, sets
     const hits = nearest(ix, q, k, sets);
     return hits.length ? hits : null;
   })().catch(() => null);
+  nearestBusy = work;
+  work.finally(() => {
+    if (nearestBusy === work) nearestBusy = null;
+  });
   return Promise.race([work, new Promise<null>((r) => setTimeout(() => r(null), timeoutMs))]);
 }
