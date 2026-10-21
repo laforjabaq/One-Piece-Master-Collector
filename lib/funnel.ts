@@ -9,7 +9,9 @@ export type Funnel = {
   /** paso 3: coincidencia de arte de la elegida (0..1) */
   art?: number;
   /** cómo se llegó a las candidatas */
-  source: "name+code" | "name" | "code";
+  source: "name+code" | "name" | "code" | "art";
+  /** paso 0 (con índice): códigos de los k vecinos de arte más cercanos */
+  artTop?: { codes: string[]; k: number };
   /** nombre y código no coinciden: qué se hizo */
   conflict?: string;
 };
@@ -42,12 +44,35 @@ export function decide(nameText: string, names: NameMatch[], codes: string[], co
   return { codes, funnel: { source: "code", conflict } };
 }
 
+/**
+ * Arte como señal principal (con el índice de todo el catálogo): los k
+ * vecinos más cercanos acotan las candidatas y el OCR decide entre ellas.
+ * - sin nombre ni código → los códigos del arte
+ * - con OCR → se quedan las candidatas que el arte también ve (si hay)
+ */
+export function withArt(d: Decision, hits: { code: string; score: number }[] | null, k = 8): Decision {
+  if (!hits?.length) return d;
+  const codes: string[] = [];
+  for (const h of hits) {
+    if (h.score < hits[0].score - 0.08) break;
+    if (!codes.includes(h.code)) codes.push(h.code);
+    if (codes.length >= 3) break;
+  }
+  const artTop = { codes, k };
+  if (!d.codes.length) return { codes, funnel: { ...d.funnel, source: d.funnel.name ? d.funnel.source : "art", artTop } };
+  const all = [...new Set(hits.map((h) => h.code))];
+  const both = d.codes.filter((c) => all.includes(c));
+  if (both.length) return { codes: both, funnel: { ...d.funnel, artTop } };
+  return { codes: d.codes, funnel: { ...d.funnel, artTop, conflict: d.funnel.conflict ?? `El arte apunta a ${codes.join(", ")}; uso el OCR` } };
+}
+
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
 /** "Nombre: Boa Hancock (24) → Código: OP14-105 (3) → Arte: 94%" */
 export function funnelLabel(f?: Funnel | null): string {
   if (!f) return "";
   const parts: string[] = [];
+  if (f.artTop) parts.push(`Arte top-${f.artTop.k}: ${f.artTop.codes.join(", ")}`);
   if (f.name) parts.push(`Nombre: ${f.name.match} (${f.name.count})`);
   parts.push(f.code ? `Código: ${f.code.code} (${f.code.count})` : "Código: —");
   if (f.art !== undefined) parts.push(`Arte: ${pct(Math.max(0, Math.min(1, f.art)))}`);

@@ -1,0 +1,66 @@
+# Regenera el índice de embeddings de arte de todo el catálogo
+# (public/embeddings/index.bin + index.json) y lo sube a main.
+# Gratis: los minutos de GitHub Actions no cuestan en repos públicos.
+name: Embeddings index
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Solo N versiones (vacío = todo el catálogo)"
+        required: false
+  schedule:
+    - cron: "17 6 * * 1" # lunes 06:17 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: embeddings
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dinov2s-quantized.onnx
+          key: dinov2s-quantized-v1
+
+      # Solo lo que usa el script (sin npm ci de toda la app).
+      - name: Install build deps
+        run: |
+          mkdir -p "$RUNNER_TEMP/deps" && cd "$RUNNER_TEMP/deps"
+          npm init -y >/dev/null
+          npm i onnxruntime-node@1.30.0 sharp@0.35.5
+          cp "$GITHUB_WORKSPACE/scripts/build-embeddings.mjs" .
+
+      - name: Build index
+        working-directory: ${{ runner.temp }}/deps
+        env:
+          OUT: ${{ github.workspace }}/public/embeddings
+          LIMIT: ${{ inputs.limit }}
+        run: node build-embeddings.mjs
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/embeddings
+          if git diff --cached --quiet; then
+            echo "Sin cambios"
+          else
+            git commit -m "Update art embeddings index"
+            git push origin HEAD:main
+          fi

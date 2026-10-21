@@ -3,16 +3,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { detectCard, getWorker, readCardCode, readCardCodeOnce, readCardName, readHints, snapshot } from "@/lib/ocr";
 import { loadNameIndex, matchName, nameIndexNow, type NameMatch } from "@/lib/names";
-import { decide, funnelLabel, type Funnel } from "@/lib/funnel";
+import { decide, funnelLabel, withArt, type Funnel } from "@/lib/funnel";
 import { normalizeCode } from "@/lib/code";
 import { scanFeedback, unlockAudio } from "@/lib/feedback";
 import { BulkPanel } from "./bulk";
-import { baseVariant, enqueue, getBatchSize, markSeen, queueCount, readQueue, recentlySeen, setBatchSize, useQueue } from "@/lib/bulk";
+import { baseVariant, enqueue, getBatchSize, markSeen, queueCount, queueValue, readQueue, recentlySeen, setBatchSize, useQueue } from "@/lib/bulk";
+import { usd } from "@/lib/collection";
+import { lockToSets, readSession } from "@/lib/session";
+import { SessionBar } from "./session-bar";
+import { loadArtIndex, artIndexNow } from "@/lib/artindex";
+import { frameStats, rectify, thumbDiff } from "@/lib/warp";
 import { ReadBanner, VariantPicker } from "./confirm";
 import type { Variant } from "@/lib/optcg";
 import { hintSummary, lastChoice, rankVariants, rememberChoice, saveHints, type Ranking, type ScanHints } from "@/lib/variants";
 import { variantHashes } from "@/lib/phash";
-import { artMatch, setArtEnabled, useArtEnabled } from "@/lib/embed";
+import { artMatch, artNearest, setArtEnabled, useArtEnabled } from "@/lib/embed";
 import { ArtModelNotice } from "./art-notice";
 
 type HintSource = (variants: Variant[]) => Promise<ScanHints | null>;
@@ -47,7 +52,13 @@ async function nameStep(src: CanvasImageSource, det: Rect | null): Promise<NameS
 const LIVE_NAME_ONLY = 0.85;
 const MAX_NAME_CODES = 8;
 
-type Mode = "single" | "bulk";
+// "fast" (Rápido): escaneo continuo; las lecturas seguras se añaden solas,
+// sin banner, y las dudosas muestran las 3 mejores para tocar.
+type Mode = "single" | "bulk" | "fast";
+// En Rápido, similitud de arte mínima de la elegida para no preguntar.
+const FAST_MIN_ART = 0.75;
+// Arte como primera señal (con índice): cada cuánto se intenta en vivo.
+const ART_FIRST_MS = 1200;
 const MODE_KEY = "opmc.scanMode.v1";
 const SLINGER_KEY = "opmc.slinger.v1";
 
@@ -116,7 +127,8 @@ export default function ScanPage() {
 
   useEffect(() => {
     try {
-      if (localStorage.getItem(MODE_KEY) === "bulk") setModeState("bulk");
+      const m = localStorage.getItem(MODE_KEY);
+      if (m === "bulk" || m === "fast") setModeState(m);
       if (localStorage.getItem(SLINGER_KEY) === "1") setSlinger(true);
     } catch {
       /* nada */
@@ -157,10 +169,14 @@ export default function ScanPage() {
       variantsCache.current.set(code, variants);
     }
     if (funnel && !pre) funnel.code = { code, count: variants.length };
+    // Sets bloqueados en la sesión: solo esas impresiones (si hay alguna).
+    variants = lockToSets(variants);
+    const fast = modeRef.current === "fast";
     const label = pre?.key ?? code;
     if (!manual) scanFeedback();
     let chosen = baseVariant(variants);
     let ranking: Ranking | null = null;
+    let confident = true;
     if (variants.length > 1) {
       // Pistas del escaneo (rareza, sello, hash de imagen) + última elección
       const hints = getHints ? await getHints(variants) : null;
@@ -169,10 +185,13 @@ export default function ScanPage() {
       if (funnel) funnel.art = ranking.art;
       // Sin ambigüedad (y con pistas reales) se salta el selector: el banner
       // de 3 s sigue permitiendo cancelar.
-      if (hints && !ranking.ambiguous && ranking.best) {
+      confident = !!(hints && !ranking.ambiguous && ranking.best && (!fast || ranking.art === undefined || ranking.art >= FAST_MIN_ART));
+      if (confident && ranking.best) {
         chosen = ranking.best;
       } else {
-        const v = await askVariant(label, variants, ranking, funnel);
+        // Rápido: solo las 3 mejores, para tocar y seguir.
+        const top = fast ? { ...ranking, ranked: ranking.ranked.slice(0, 3) } : ranking;
+        const v = await askVariant(label, fast ? top.ranked.map((r) => r.variant) : variants, top, funnel);
         setPicker(null);
         if (!v) {
           markSeen(seenKey);
@@ -189,7 +208,7 @@ export default function ScanPage() {
       markSeen(seenKey);
     }
     const detected = hintSummary(ranking);
-    if (!manual) {
+    if (!manual && !fast) {
       const ok = await confirmRead({
         title: chosen.fullName || chosen.name,
         detail: `${code} · ${chosen.label} · se añadirá a la cola${detected ? ` · ${detected}` : ""}`,
@@ -203,13 +222,20 @@ export default function ScanPage() {
         return false;
       }
     }
-    if (enqueue(code, variants, { force: true, variantId: chosen.variantId })) {
+    const sess = readSession();
+    if (enqueue(code, variants, { force: true, variantId: chosen.variantId, foil: sess.foil, lang: sess.lang })) {
       if (manual) scanFeedback();
       setFound(true);
       setTimeout(() => setFound(false), 400);
-      setStatus({ text: `✓ ${chosen.name} (${code}) en la cola`, tone: "ok" });
+      const q = readQueue();
+      setStatus({
+        text: fast
+          ? `✓ ${chosen.fullName || chosen.name} (${code}) · ${queueCount(q)} cartas · ${usd(queueValue(q))}`
+          : `✓ ${chosen.name} (${code}) en la cola`,
+        tone: "ok",
+      });
     }
-    if (queueCount(readQueue()) >= batchRef.current) {
+    if (!fast && queueCount(readQueue()) >= batchRef.current) {
       runningRef.current = false;
       setReviewing(true);
       return true;
@@ -219,7 +245,7 @@ export default function ScanPage() {
 
   const goTo = useCallback(
     async (code: string, getHints?: HintSource, funnel?: Funnel) => {
-      if (modeRef.current === "bulk") return queueCode(code, false, getHints, funnel);
+      if (modeRef.current !== "single") return queueCode(code, false, getHints, funnel);
       if (triedRef.current.has(code)) return false;
       triedRef.current.add(code);
       setStatus({ text: `Leí ${code}, buscando…` });
@@ -256,14 +282,15 @@ export default function ScanPage() {
   // los códigos con ese nombre; el arte y las pistas eligen entre ellas.
   const goName = useCallback(
     async (codes: string[], getHints: HintSource, funnel: Funnel) => {
-      const key = `nombre:${funnel.name?.match ?? codes.join(",")}`;
+      const label = funnel.name?.match ?? `arte ${codes.join(", ")}`;
+      const key = `nombre:${label}`;
       if (modeRef.current === "single" && triedRef.current.has(key)) return false;
-      if (modeRef.current === "bulk" && recentlySeen(key)) {
+      if (modeRef.current !== "single" && recentlySeen(key)) {
         markSeen(key);
         return false;
       }
       triedRef.current.add(key);
-      setStatus({ text: `Leí el nombre ${funnel.name?.match}, buscando…` });
+      setStatus({ text: funnel.name ? `Leí el nombre ${funnel.name.match}, buscando…` : `El arte se parece a ${codes.join(", ")}, buscando…` });
       const lists = await Promise.all(
         codes.slice(0, MAX_NAME_CODES).map(async (c) => {
           const cached = variantsCache.current.get(c);
@@ -275,11 +302,11 @@ export default function ScanPage() {
           return vs;
         }),
       );
-      const all = lists.flat();
+      const all = lockToSets(lists.flat());
       setTimeout(() => triedRef.current.delete(key), 4000);
       if (!all.length) return false;
       if (funnel.name) funnel.name.count = all.length;
-      if (modeRef.current === "bulk") return queueCode(all[0].code, false, getHints, funnel, { key: funnel.name?.match ?? key, variants: all });
+      if (modeRef.current !== "single") return queueCode(all[0].code, false, getHints, funnel, { key: label, variants: all });
       scanFeedback();
       const hints = await getHints(all);
       const hashes = hints?.hash ? await variantHashes(all) : {};
@@ -310,13 +337,20 @@ export default function ScanPage() {
   );
 
   // Embudo: Nombre → Código → (Arte en las pistas). Devuelve true si terminó.
+  // Con el índice de todo el catálogo, el arte va primero: sus k vecinos más
+  // cercanos acotan las candidatas y el OCR (nombre, código) y el sello deciden.
+  const dispatchedRef = useRef(false);
   const handleRead = useCallback(
-    async (src: CanvasImageSource, card: Rect, codes: string[], codeConf: number, name: NameStep | null, live: boolean) => {
-      const d = decide(name?.text ?? "", name?.matches ?? [], codes, codeConf);
+    async (src: CanvasImageSource, card: Rect, codes: string[], codeConf: number, name: NameStep | null, live: boolean, hasCard = true) => {
+      const hits = hasCard && (artIndexNow() || !live) ? await artNearest(src, card, 8, readSession().sets) : null;
+      const d = withArt(decide(name?.text ?? "", name?.matches ?? [], codes, codeConf), hits);
       const f = d.funnel;
       if (f.conflict) console.info("[embudo]", f.conflict);
+      if (!d.codes.length) return false;
+      dispatchedRef.current = true;
+      if (f.source === "art") return goName(d.codes, hintSource(src, card, ""), f);
       if (f.source === "name") {
-        if (live && !codes.length && (f.name?.score ?? 0) < LIVE_NAME_ONLY) return false;
+        if (live && !codes.length && !f.artTop && (f.name?.score ?? 0) < LIVE_NAME_ONLY) return false;
         return goName(d.codes, hintSource(src, card, ""), f);
       }
       for (const c of d.codes) if (await goTo(c, hintSource(src, card, c), { ...f, name: f.name ? { ...f.name } : undefined })) return true;
@@ -365,6 +399,7 @@ export default function ScanPage() {
   const loop = useCallback(async () => {
     const video = videoRef.current, box = boxRef.current;
     let n = 0;
+    let prevThumb: Float32Array | null = null, stableFrames = 0, lastArt = 0, glareShown = 0;
     while (runningRef.current && video && box) {
       if (video.readyState >= 2 && video.videoWidth) {
         // Pasar el marco de pantalla a coordenadas del video (object-fit: cover).
@@ -378,18 +413,35 @@ export default function ScanPage() {
         try {
           // Con carta detectada: nombre y código en paralelo sobre la misma copia del fotograma.
           const seen = detectCard(video, view);
-          const shot = seen ? snapshot(video) : null;
+          let shot: HTMLCanvasElement | null = seen ? snapshot(video) : null;
+          // Estabilidad (varios fotogramas sin movimiento) y aviso de reflejos.
+          const st = seen && shot ? frameStats(shot, seen) : null;
+          stableFrames = st && thumbDiff(prevThumb, st.thumb) < 6 ? stableFrames + 1 : 0;
+          prevThumb = st?.thumb ?? null;
+          if (st && st.glare > 0.04 && Date.now() - glareShown > 4000) {
+            glareShown = Date.now();
+            setStatus({ text: "Hay reflejos en la carta: inclínala un poco o cambia la luz", tone: "error" });
+          }
+          // Perspectiva: si la carta está inclinada, se endereza antes de leer.
+          let seenRect = seen, view2 = view, guide = card;
+          const warped = seen && shot ? rectify(shot, seen) : null;
+          if (warped) {
+            shot = warped.src;
+            seenRect = view2 = guide = warped.card;
+          }
           const [{ codes, text, preview, card: det, conf }, name] = await Promise.all([
-            readCardCodeOnce(shot ?? video, card, view, n++),
-            shot ? nameStep(shot, seen) : Promise.resolve(null),
+            readCardCodeOnce(shot ?? video, guide, view2, n++),
+            shot && seenRect ? nameStep(shot, seenRect) : Promise.resolve(null),
           ]);
           if (text.trim()) setLastText(text.trim());
           if (name?.text) setLastName(name.text);
           if (preview && n % 3 === 1) setPreview(preview);
           if (name?.preview && n % 3 === 1) setNamePreview(name.preview);
-          if (codes.length || name?.matches.length) {
+          const artTurn = !!artIndexNow() && !!seenRect && stableFrames >= 2 && Date.now() - lastArt > ART_FIRST_MS;
+          if (codes.length || name?.matches.length || artTurn) {
+            if (artTurn) lastArt = Date.now();
             const src = shot ?? snapshot(video);
-            if (await handleRead(src, det ?? seen ?? card, codes, conf ?? 0, name, true)) return;
+            if (await handleRead(src, det ?? seenRect ?? card, codes, conf ?? 0, name, true, !!(det ?? seenRect))) return;
           }
         } catch (e) {
           setStatus({ text: "Error del lector: " + (e as Error).message, tone: "error" });
@@ -442,6 +494,7 @@ export default function ScanPage() {
   useEffect(() => {
     getWorker().catch(() => {}); // precarga el OCR
     loadNameIndex().catch(() => {}); // y el índice de nombres
+    loadArtIndex().catch(() => {}); // y el de arte de todo el catálogo (si existe)
     start();
     return stop;
   }, [start, stop]);
@@ -460,15 +513,23 @@ export default function ScanPage() {
     img.src = URL.createObjectURL(file);
     await img.decode();
     try {
-      const full = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
-      const det = detectCard(img, full);
-      const [{ codes, text, preview, card, conf }, name] = await Promise.all([readCardCode(img, full), nameStep(img, det)]);
+      let src: CanvasImageSource = img;
+      let full = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
+      let det = detectCard(img, full);
+      // Perspectiva: carta inclinada → se endereza antes de leer y comparar.
+      const warped = det ? rectify(img, det) : null;
+      if (warped) {
+        src = warped.src;
+        full = det = warped.card;
+      }
+      const [{ codes, text, preview, card, conf }, name] = await Promise.all([readCardCode(src, full), nameStep(src, det)]);
       setLastText(text.trim() || "(sin texto)");
       setLastName(name?.text ?? "");
       if (preview) setPreview(preview);
       if (name?.preview) setNamePreview(name.preview);
-      if (await handleRead(img, card ?? det ?? full, codes, conf ?? 0, name, false)) return;
-      if (modeRef.current === "bulk" && (codes.length || name?.matches.length)) return;
+      dispatchedRef.current = false;
+      if (await handleRead(src, card ?? det ?? full, codes, conf ?? 0, name, false, !!(card ?? det))) return;
+      if (modeRef.current !== "single" && dispatchedRef.current) return;
       setStatus({ text: "No encontré el código en la foto. Acércate más a la carta o escríbelo abajo.", tone: "error" });
     } finally {
       URL.revokeObjectURL(img.src);
@@ -482,7 +543,7 @@ export default function ScanPage() {
       setStatus({ text: "Ese código no tiene el formato esperado (ej. OP05-119, ST10-002, P-041).", tone: "error" });
       return;
     }
-    if (mode === "bulk") {
+    if (mode !== "single") {
       setManual("");
       queueCode(code, true);
       return;
@@ -516,7 +577,16 @@ export default function ScanPage() {
       <div className="seg" role="tablist" aria-label="Modo de escaneo" onPointerDown={unlockAudio}>
         <button role="tab" aria-selected={mode === "single"} className={mode === "single" ? "on" : ""} onClick={() => setMode("single")}>1 a 1</button>
         <button role="tab" aria-selected={mode === "bulk"} className={mode === "bulk" ? "on" : ""} onClick={() => setMode("bulk")}>Bulk</button>
+        <button role="tab" aria-selected={mode === "fast"} className={mode === "fast" ? "on" : ""} onClick={() => setMode("fast")}>Rápido</button>
       </div>
+      <SessionBar />
+      {mode === "fast" && (
+        <div className="fast-bar">
+          <span className="pill" data-testid="fast-count" style={{ fontSize: "0.9rem" }}>{count} cartas · {usd(queueValue(queue))}</span>
+          <span className="item-meta" style={{ flex: 1 }}>Las seguras se añaden solas</span>
+          <button className="btn primary small" onClick={openReview} disabled={!queue.length}>Terminar y revisar</button>
+        </div>
+      )}
       {mode === "bulk" && (
         <div className="row" style={{ marginBottom: 12 }}>
           <span className="pill" data-testid="queue-count" style={{ fontSize: "0.9rem" }}>En cola: {count} / {batch}</span>
@@ -552,7 +622,8 @@ export default function ScanPage() {
             {torch ? "Luz ✓" : "Luz"}
           </button>
         )}
-        <div className={"scanner-status " + (status.tone === "error" ? "error" : "")}>{status.text}</div>
+        {camera && <div className="capture-guide">Fondo oscuro liso · sin reflejos · la carta entera dentro del marco</div>}
+        <div className={"scanner-status " + (status.tone === "error" ? "error" : "")} data-testid="scanner-status">{status.text}</div>
         {banner && <ReadBanner key={banner.title + banner.detail} title={banner.title} detail={banner.detail} image={banner.image} funnel={banner.funnel} onDone={banner.resolve} />}
       </div>
       <div className="row" style={{ marginTop: 8 }}>
@@ -598,7 +669,7 @@ export default function ScanPage() {
           autoCorrect="off"
           spellCheck={false}
         />
-        <button className="btn primary" type="submit">{mode === "bulk" ? "Añadir" : "Ir"}</button>
+        <button className="btn primary" type="submit">{mode !== "single" ? "Añadir" : "Ir"}</button>
       </form>
 
       {(lastText || lastName) && (

@@ -10,7 +10,12 @@ export type QueueItem = {
   variantId: string; // versión elegida (por defecto la base)
   checked: boolean;
   at: number;
+  foil?: boolean;
+  lang?: string; // EN por defecto
 };
+
+const same = (a: Pick<QueueItem, "code" | "variantId" | "foil" | "lang">, b: Pick<QueueItem, "code" | "variantId" | "foil" | "lang">) =>
+  a.code === b.code && a.variantId === b.variantId && !!a.foil === !!b.foil && (a.lang || "EN") === (b.lang || "EN");
 
 const KEY = "opmc.bulkQueue.v1";
 const SIZE_KEY = "opmc.bulkSize.v1";
@@ -74,7 +79,7 @@ export function markSeen(code: string, now = Date.now()) {
 export function enqueue(
   code: string,
   variants: Variant[],
-  opts: { force?: boolean; now?: number; variantId?: string } = {},
+  opts: { force?: boolean; now?: number; variantId?: string; foil?: boolean; lang?: string } = {},
 ): boolean {
   const now = opts.now ?? Date.now();
   const seen = recentlySeen(code, now);
@@ -82,16 +87,40 @@ export function enqueue(
   if (!opts.force && seen) return false;
   const variantId = opts.variantId ?? baseVariant(variants)?.variantId ?? code;
   const q = [...read()];
-  const i = q.findIndex((x) => x.code === code && x.variantId === variantId);
+  const extra = { ...(opts.foil ? { foil: true } : {}), ...(opts.lang && opts.lang !== "EN" ? { lang: opts.lang } : {}) };
+  const i = q.findIndex((x) => same(x, { code, variantId, ...extra }));
   if (i >= 0) q[i] = { ...q[i], qty: q[i].qty + 1, at: now };
-  else q.push({ code, qty: 1, variants, variantId, checked: true, at: now });
+  else q.push({ code, qty: 1, variants, variantId, checked: true, at: now, ...extra });
   write(q);
   return true;
 }
 
-export function updateItem(item: Pick<QueueItem, "code" | "variantId">, patch: Partial<QueueItem>) {
-  write(read().map((x) => (x.code === item.code && x.variantId === item.variantId ? { ...x, ...patch } : x)));
+export function updateItem(item: Pick<QueueItem, "code" | "variantId" | "foil" | "lang">, patch: Partial<QueueItem>) {
+  write(read().map((x) => (same(x, item) ? { ...x, ...patch } : x)));
 }
+
+/** Edición masiva: aplica `patch(item)` a cada elemento marcado y junta los que queden iguales. */
+export function updateChecked(patch: (i: QueueItem) => Partial<QueueItem>, setAll?: boolean) {
+  const out: QueueItem[] = [];
+  for (const x0 of read()) {
+    const x = setAll === undefined ? x0 : { ...x0, checked: setAll };
+    const y = x.checked && setAll === undefined ? { ...x, ...patch(x) } : x;
+    if (y.lang === "EN") delete y.lang;
+    if (!y.foil) delete y.foil;
+    const j = out.findIndex((o) => same(o, y));
+    if (j >= 0) out[j] = { ...out[j], qty: out[j].qty + y.qty };
+    else out.push(y);
+  }
+  write(out);
+}
+
+export function removeChecked() {
+  write(read().filter((x) => !x.checked));
+}
+
+export const itemVariant = (i: QueueItem) => i.variants.find((x) => x.variantId === i.variantId) ?? i.variants[0];
+/** Valor de mercado (TCGplayer) de la cola, en USD. */
+export const queueValue = (q: QueueItem[]) => q.reduce((s, i) => s + (itemVariant(i)?.price ?? 0) * i.qty, 0);
 
 export function clearQueue() {
   lastSeen.clear();
