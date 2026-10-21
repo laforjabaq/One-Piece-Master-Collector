@@ -17,6 +17,8 @@ export type Entry = {
   // true = carta registrada con el escaneo en lote (sección "Bulk").
   // Se guarda con la clave `${variantId}|bulk` para no mezclarla con la normal.
   bulk?: boolean;
+  foil?: boolean;
+  lang?: string; // idioma de la copia (EN si falta)
   addedAt: string;
   updatedAt: string;
 };
@@ -68,10 +70,13 @@ export function useCollection(): Collection {
   );
 }
 
-export const entryKey = (e: { variantId: string; bulk?: boolean }) => (e.bulk ? `${e.variantId}|bulk` : e.variantId);
+export const entryKey = (e: { variantId: string; bulk?: boolean; foil?: boolean; lang?: string }) =>
+  (e.bulk ? `${e.variantId}|bulk` : e.variantId) + (e.foil ? "|foil" : "") + (e.lang && e.lang !== "EN" ? `|${e.lang}` : "");
 
 export function ownedQty(col: Collection, variantId: string): number {
-  return (col[variantId]?.qty ?? 0) + (col[`${variantId}|bulk`]?.qty ?? 0);
+  let n = 0;
+  for (const [k, e] of Object.entries(col)) if (k === variantId || k.startsWith(`${variantId}|`)) n += e.qty;
+  return n;
 }
 
 export function addToCollection(card: Omit<Entry, "qty" | "addedAt" | "updatedAt">, qty: number) {

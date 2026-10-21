@@ -204,3 +204,15 @@ details summary { cursor: pointer; color: var(--muted); }
 .hint-line { font-size: 0.85rem; color: var(--ok); margin: 4px 0; }
 .suggested { border-color: var(--accent-2) !important; box-shadow: 0 0 0 3px rgba(244, 201, 93, 0.25); }
 .badge { display: inline-block; font-size: 0.7rem; background: var(--accent-2); color: #000; border-radius: 6px; padding: 1px 6px; }
+
+/* Revisión: edición masiva */
+.bulk-edit { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.row.wrap { flex-wrap: wrap; }
+.small-input { flex: none !important; width: auto; min-height: 36px; padding: 2px 8px; font-size: 0.85rem; }
+input.small-input[type="number"] { width: 64px; }
+
+/* Escáner: ajustes fijos de la sesión y modo rápido */
+.session-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.session-bar .chip { display: inline-flex; align-items: center; gap: 4px; }
+.fast-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; font-weight: 600; }
+.capture-guide { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 4; font-size: 0.75rem; text-align: center; padding: 4px 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.55); color: #fff; pointer-events: none; }

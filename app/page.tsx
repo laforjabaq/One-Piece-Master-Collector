@@ -100,6 +100,8 @@ export default function CollectionPage() {
                   <div className="item-title">{e.name}</div>
                   <div className="item-meta">
                     {e.code} · {e.label}{e.rarity ? ` · ${e.rarity}` : ""}{e.bulk && <span className="pill" style={{ marginLeft: 4 }}>Bulk</span>}
+                    {e.foil && <span className="pill">Foil</span>}
+                    {e.lang && e.lang !== "EN" && <span className="pill">{e.lang}</span>}
                   </div>
                   <div className="item-meta">{usd(e.price)} c/u</div>
                 </div>

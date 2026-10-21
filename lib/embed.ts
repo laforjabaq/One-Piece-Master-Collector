@@ -10,6 +10,7 @@
 import { useSyncExternalStore } from "react";
 import { readableUrl } from "./phash";
 import type { ArtScores } from "./variants";
+import { compatible, loadArtIndex, nearest, rowVector, scoreIds, type ArtIndex, type Hit } from "./artindex";
 export type { ArtScores };
 
 type Rect = { x: number; y: number; w: number; h: number };
@@ -347,15 +348,26 @@ export async function artMatch(
     if (!e) return null;
     // El recorte se toma ya, antes de que cambie el fotograma.
     const query = Float32Array.from(await e.embed(pixels(src, card), INPUT));
-    const refs = await Promise.all(variants.map((v) => variantVectors(e, v, ["card"])));
-    const art: Record<string, number> = {};
-    variants.forEach((v, i) => {
-      if (refs[i].card) art[v.variantId] = cosine(query, refs[i].card!);
-    });
-    const ids = Object.keys(art).sort((a, b) => art[b] - art[a]);
-    if (!ids.length) return null;
+    // Con el índice precalculado: similitud instantánea, sin bajar imágenes.
+    const ix = await indexFor(e, query.length);
+    const ids = variants.map((v) => v.variantId);
+    let refs: Partial<Record<Zone, Float32Array>>[];
+    let art: Record<string, number> = {};
+    if (ix && ids.every((id) => ix.rowOf.has(id))) {
+      art = scoreIds(ix, query, ids);
+      refs = ids.map((id) => ({ card: rowVector(ix, ix.rowOf.get(id)!) }));
+      setSource("index");
+    } else {
+      refs = await Promise.all(variants.map((v) => variantVectors(e, v, ["card"])));
+      variants.forEach((v, i) => {
+        if (refs[i].card) art[v.variantId] = cosine(query, refs[i].card!);
+      });
+      setSource("lazy");
+    }
+    const sorted = Object.keys(art).sort((a, b) => art[b] - art[a]);
+    if (!sorted.length) return null;
     // Mismo arte que la mejor: decide la zona del sello.
-    const top = refs[variants.findIndex((v) => v.variantId === ids[0])].card!;
+    const top = refs[variants.findIndex((v) => v.variantId === sorted[0])].card!;
     const twins = variants.filter((v, i) => refs[i].card && cosine(top, refs[i].card!) >= SAME_ART);
     let stamp: Record<string, number> | undefined;
     if (twins.length > 1) {
@@ -370,4 +382,42 @@ export async function artMatch(
   })().catch(() => null);
   const timeout = new Promise<null>((r) => setTimeout(() => r(null), wait));
   return Promise.race([work, timeout]);
+}
+
+// ---------- Índice de todo el catálogo ----------
+
+/** De dónde salió la última comparación de arte (para depurar y las pruebas). */
+let lastSource: "index" | "lazy" | "" = "";
+export const artSource = () => lastSource;
+function setSource(s: "index" | "lazy") {
+  lastSource = s;
+  try {
+    document.documentElement.dataset.artSource = s;
+  } catch {
+    /* nada */
+  }
+}
+
+async function indexFor(e: Embedder, dims: number): Promise<ArtIndex | null> {
+  const ix = await Promise.race([loadArtIndex(), new Promise<null>((r) => setTimeout(() => r(null), 3000))]);
+  return ix && compatible(ix, e.version, dims) ? ix : null;
+}
+
+/**
+ * Arte como señal principal: vecinos más cercanos en todo el catálogo
+ * (restringido a los sets bloqueados). null si no hay índice o modelo.
+ */
+export async function artNearest(src: CanvasImageSource, card: Rect, k = 8, sets: string[] = [], timeoutMs = 4000): Promise<Hit[] | null> {
+  if (!artEnabled()) return null;
+  const ix = await Promise.race([loadArtIndex(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]);
+  if (!ix) return null;
+  const work = (async () => {
+    const e = await getEmbedder();
+    if (!e) return null;
+    const q = Float32Array.from(await e.embed(pixels(src, card), INPUT));
+    if (!compatible(ix, e.version, q.length)) return null;
+    const hits = nearest(ix, q, k, sets);
+    return hits.length ? hits : null;
+  })().catch(() => null);
+  return Promise.race([work, new Promise<null>((r) => setTimeout(() => r(null), timeoutMs))]);
 }

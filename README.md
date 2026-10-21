@@ -54,3 +54,27 @@ detectada con las imágenes de cada versión usando embeddings de imagen
   modelo no carga, se sigue con el código, los sellos y el hash como antes.
 - Margen para aceptar sola (similitud coseno de la 1.ª sobre la 2.ª):
   `localStorage["opmc.artMargin.v1"]` (por defecto 0.04).
+
+## Índice de arte de todo el catálogo y escaneo continuo
+
+Ideas tomadas de cómo escanea ManaBox, todo gratis:
+
+- **Índice precalculado** (`public/embeddings/index.bin` + `index.json`): un vector
+  DINOv2-small int8 por versión de carta (~2 MB para ~5.000 versiones). Lo genera
+  `scripts/build-embeddings.mjs` con el mismo modelo y preprocesado que el worker
+  del teléfono, y lo actualiza cada lunes el workflow `.github/workflows/embeddings.yml`
+  (o a mano: Actions → *Embeddings index* → *Run workflow*). El Service Worker lo
+  cachea. Si no existe, la app sigue calculando los vectores por candidata.
+- **Arte primero**: con el índice, los 8 vecinos más cercanos acotan las candidatas
+  y el OCR de nombre/código y el sello deciden entre ellas (el embudo lo muestra
+  como `Arte top-8: …`). Si no se leen ni nombre ni código, decide el arte.
+- **Modo Rápido**: las lecturas seguras se añaden solas (sonido, contador y valor
+  TCGplayer acumulado); las dudosas muestran las 3 mejores. Al terminar se revisa
+  la lista con edición masiva (set, foil, idioma, cantidad, borrar).
+- **Ajustes fijos de la sesión**: sets bloqueados, foil e idioma, en la barra de
+  chips sobre el visor.
+- **Perspectiva**: si la carta está inclinada se buscan sus 4 esquinas y se
+  endereza con una homografía antes de leer y comparar (`lib/warp.ts`).
+- Guía de captura en pantalla y aviso de reflejos.
+
+Generar el índice en local: `npm i --no-save onnxruntime-node@1.30.0 sharp@0.35.5 && node scripts/build-embeddings.mjs`.
